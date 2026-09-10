@@ -1,0 +1,81 @@
+# Unique exercise NAMES from a real Fitbod export, and nothing else.
+# The export itself (fitbod_export.csv) is personal training data — dates,
+# weights, reps — and is deliberately not committed; see .gitignore.
+#
+# tests/test.mjs only ever read column 2 of that CSV, deduplicated, to prove
+# the muscle/equipment classifiers cope with every name Fitbod actually
+# emits. Names carry none of the private signal, so they live here instead
+# and the suite stays green in a fresh clone. If the real export is present
+# locally, test.mjs prefers it, so a new export still surfaces new names.
+Ab Crunch Machine
+Air Bike
+Assisted Dip
+Assisted Pull Up
+Back Extensions
+Back Squat
+Barbell Bench Press
+Barbell Curl
+Barbell Hip Thrust
+Barbell Incline Bench Press
+Cable Archer Pull
+Cable Bicep Curl
+Cable Face Pull
+Cable Hip Extension
+Cable Hip Flexor
+Cable Lateral Raise
+Cable Rope Tricep Extension
+Cable Row
+Cable Tricep Pushdown
+Cat Cow
+Crunches
+Dead Bug
+Decline Crunch
+Dumbbell Back Fly
+Dumbbell Bench Press
+Dumbbell Bicep Curl
+Dumbbell Fly
+Dumbbell Front Raise
+Dumbbell Hip Thrust
+Dumbbell Incline Bench Press
+Dumbbell Romanian Deadlift
+Dumbbell Row
+Dumbbell Shoulder Press
+Dumbbell Skullcrusher
+Foam Roll Glutes
+Foam Roll Hamstrings
+Foam Roll Lats
+Foam Roll Lower Back
+Foam Roll Quadriceps
+Foam Roll Upper Back
+Good Morning
+Hammer Curls
+Hammerstrength Iso Row
+Incline Back Extension
+Incline Dumbbell Curl
+Lat Pulldown
+Leg Extension
+Leg Press
+Lower Back Stretch
+Lunge Twist
+Lying Hamstrings Curl
+Machine Bench Press
+Machine Bicep Curl
+Machine Fly
+Machine Leg Press
+Machine Preacher Curl
+Machine Rear Delt Fly
+Machine Row
+Machine Shoulder Press
+Machine Tricep Dip
+Romanian Deadlift
+Seated Back Extension
+Seated Cable Chest Fly
+Seated Leg Curl
+Smith Machine Calf Raise
+Standing Machine Calf Press
+Stiff-Legged Deadlift
+Superman
+TRX T Deltoid Fly
+TRX W Deltoid Fly
+TRX Y Deltoid Fly
+Vertical Knee Raise

@@ -1,0 +1,23 @@
+# Normalise line endings to LF in the repository.
+#
+# This machine has core.autocrlf=true, which means a fresh clone would get a
+# CRLF working tree while the repo stores LF. That is normally harmless, but
+# this project commits a GENERATED file: tools/build.mjs --check rebuilds
+# splitcraft.html from src/ and compares it byte-for-byte against the copy on
+# disk, and tests/run.mjs builds before every run. Any line-ending asymmetry
+# between the sources and the built artefact makes that comparison fail for
+# reasons that have nothing to do with the code — the worst kind of "works on
+# my machine", because it only appears in a fresh clone.
+#
+# Pinning eol=lf keeps the working tree matching what is committed, on every
+# platform, which is also what the files already are today.
+* text=auto eol=lf
+
+# Binary assets: never line-ending-converted, never diffed as text.
+*.png binary
+*.ico binary
+
+# splitcraft.html is built from src/ by tools/build.mjs. Marking it generated
+# collapses it in diffs and keeps it out of language statistics, so a one-line
+# source change doesn't show up as a 400KB diff burying the actual edit.
+splitcraft.html linguist-generated=true

@@ -1,0 +1,14 @@
+# Personal training data — never commit this.
+#
+# A Fitbod export is a detailed record of when you trained, how strong you were
+# and when you stopped: timestamped sets with exact weights. The app itself
+# needs none of it in the repo (logged data lives in IndexedDB on the device),
+# and the test suite needs only the exercise names, which are checked in as
+# tests/fitbod-exercise-names.txt instead.
+fitbod_export.csv
+*-export.csv
+
+# Local scratch
+node_modules/
+.DS_Store
+Thumbs.db

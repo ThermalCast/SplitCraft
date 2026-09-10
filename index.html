@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow, noarchive, noimageindex">
+<title>SplitCraft</title>
+
+<!-- Redirect stub, not part of the app.
+     GitHub Pages serves this for the bare directory URL
+     (https://<user>.github.io/<repo>/), which would otherwise 404 because the
+     app ships under its own name as splitcraft.html. Six lines here beat
+     renaming the built file to index.html and churning tools/build.mjs, sw.js,
+     the manifest, every test suite and the docs for what is only a URL
+     cosmetic.
+
+     This is also the './' entry in the service worker's SHELL list. That entry
+     could never be precached while nothing was served at the directory root —
+     it failed silently, by design, since sw.js caches each URL individually
+     precisely so one 404 can't discard the whole precache. Now it resolves,
+     so the bare URL works offline too.
+
+     Both redirect mechanisms are deliberate. location.replace() fires first
+     and leaves NO history entry, so Back returns where the user actually came
+     from instead of bouncing them through this page again. The meta refresh
+     is the fallback for JavaScript being unavailable, and the visible link is
+     the last resort if both are somehow blocked. -->
+<meta http-equiv="refresh" content="0; url=./splitcraft.html">
+<script>location.replace('./splitcraft.html');</script>
+
+<style>
+  html { background: #0e1013; color-scheme: dark; }
+  body {
+    margin: 0; min-height: 100vh;
+    display: grid; place-items: center;
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: #e6e8ea; text-align: center;
+  }
+  a { color: #6ea8fe; }
+</style>
+</head>
+<body>
+  <p>Opening SplitCraft&hellip;<br><a href="./splitcraft.html">Continue</a></p>
+</body>
+</html>

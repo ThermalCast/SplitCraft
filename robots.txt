@@ -1,0 +1,54 @@
+# SplitCraft — keep this out of search results.
+#
+# IMPORTANT: this file only takes effect if it is served from the ORIGIN ROOT.
+# robots.txt is fetched per origin, at https://<host>/robots.txt, and nowhere
+# else. So:
+#
+#   * User/org site  (https://<user>.github.io/)          -> this file works,
+#     when it sits in the root of the <user>.github.io repo.
+#   * Custom domain  (https://log.example.com/)           -> this file works.
+#   * Project site   (https://<user>.github.io/splitcraft/) -> THIS FILE IS
+#     IGNORED. Crawlers read https://<user>.github.io/robots.txt instead,
+#     which is served from a different repo. Deploy this to that repo's root,
+#     or rely on the <meta name="robots" content="noindex"> tag in the page
+#     itself, which works regardless of subpath.
+#
+# The meta tag is the real mechanism; this file is a second layer for the
+# hosting shapes where it applies. Note that the two must not contradict each
+# other: a crawler blocked here can never fetch the page to see the noindex
+# tag, and a blocked URL can still surface as a bare link if anything points
+# at it. So this file deliberately does NOT Disallow the app itself — it
+# refuses the crawlers wholesale, and any crawler that ignores the refusal is
+# met by the noindex tag when it fetches the page.
+#
+# None of this is access control. It is a request, honoured only by crawlers
+# that choose to. Anything that must not be read by strangers must not be
+# hosted publicly in the first place.
+
+User-agent: *
+Disallow: /
+
+# The named groups below are all redundant against the wildcard above: a
+# crawler obeys only its single most-specific matching group, and every one of
+# these would land on `User-agent: *` and be refused anyway. They are spelled
+# out because the wildcard is the line most likely to be loosened later, and
+# because naming them records the intent explicitly — matching the robots.txt
+# already serving thermalcast.github.io.
+
+# Model-training and AI-assistant crawlers.
+User-agent: GPTBot
+Disallow: /
+
+User-agent: ClaudeBot
+Disallow: /
+
+User-agent: Google-Extended
+Disallow: /
+
+# Archivers ignore or have stopped honouring robots.txt for archiving, and are
+# listed here only so the intent is on record, not because it is enforced.
+User-agent: ia_archiver
+Disallow: /
+
+User-agent: archive.org_bot
+Disallow: /
