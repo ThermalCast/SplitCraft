@@ -561,6 +561,36 @@
      noticing without reading as an error. See BACKUP_STALE_DAYS. */
   #backup-freshness.stale { color: var(--accent-hi); }
 
+  /* ===== Info disclosure ("?" bubble) =====
+     For a setting whose one-sentence .hint isn't the whole story. Native
+     <details>/<summary> — same mechanism as the disclosures elsewhere in
+     this file (Log a set manually, Generate a new plan) — so opening and
+     closing it needs no JS at all, just these rules. A plain disclosure
+     rather than a floating tooltip: a tooltip has to fight a phone screen
+     for room to render in and has no honest touch equivalent; a block that
+     pushes the rest of the form down does not.
+
+     display:inline (not the element's block default) is what puts the "?"
+     at the end of the sentence it belongs to instead of dropping to a line
+     of its own — CSS then generates an anonymous block box around the
+     .info-text child when it opens (a block-level child inside an inline
+     parent always does), so the expanded paragraph still gets its own full-
+     width line below, with no flex-wrap trick needed to force it there. */
+  details.info { display: inline; }
+  details.info > summary {
+    display: inline-flex; align-items: center; justify-content: center;
+    vertical-align: -3px;
+    list-style: none; cursor: pointer; user-select: none;
+    width: 17px; height: 17px; border-radius: 50%;
+    margin-left: 5px;
+    border: 1px solid var(--border-strong); color: var(--text-dim);
+    font-size: 10.5px; font-weight: 700; font-family: var(--sans);
+    transition: color 0.14s ease, border-color 0.14s ease, background 0.14s ease;
+  }
+  details.info > summary::-webkit-details-marker { display: none; }
+  details.info[open] > summary { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+  details.info .info-text { color: var(--text-faint); font-size: 12px; line-height: 1.55; margin-top: 6px; }
+
   /* ===== Inline set logging / editing rows =====
      flex-wrap so cramped rows reflow onto a second line on narrow phones
      instead of squeezing every control down to an untappable size. */
@@ -952,7 +982,7 @@
         </div>
       </div>
       <button type="button" class="primary-btn" id="session-start-btn" style="margin-top:14px;">Start Warm-up</button>
-      <div class="hint" id="session-start-hint" style="margin-top:6px;">Optional — the clock also starts itself on your first logged set. Start it here if you warm up first.</div>
+      <div class="hint" id="session-start-hint" style="margin-top:6px;">Optional — the clock also starts itself on your first logged set.</div>
       <button type="button" class="primary-btn danger-btn" id="session-complete-btn" style="display:none; margin-top:14px;">Complete Workout</button>
     </div>
 
@@ -1114,7 +1144,9 @@
           <option value="5">5 sets</option>
           <option value="6">6 sets</option>
         </select>
-        <div class="hint">Fixes every exercise to the same number. Left on "let AI decide", it varies sets by exercise — usually more on compounds than on isolation work. Pinning it is applied on the way in as well as asked for in the prompt, so the plan gets the number you chose whatever the model returns. With a session length set, fixing sets means the AI adjusts the number of <em>exercises</em> to fit instead.</div>
+        <div class="hint">Fixes every exercise to the same set count; left on "let AI decide", it varies by exercise.
+          <details class="info"><summary aria-label="More about fixed set count">?</summary><div class="info-text">Pinning it is applied on the way in as well as asked for in the prompt, so the plan gets the number you chose whatever the model returns. With a session length set, fixing sets means the AI adjusts the number of <em>exercises</em> to fit instead.</div></details>
+        </div>
       </div>
       <div class="field">
         <label for="plan-equipment">Equipment available</label>
@@ -1123,9 +1155,7 @@
       <div class="field">
         <label for="plan-notes">Notes / constraints</label>
         <textarea id="plan-notes" placeholder="e.g. bad left shoulder, avoid overhead pressing"></textarea>
-        <div class="hint">Kept between generations, including next week's — an injury outlasts one
-          plan. Everything on this form is saved as you leave each field, so clear a note once it
-          no longer applies.</div>
+        <div class="hint">Kept between generations — saved automatically as you leave the field, so clear it once it no longer applies.</div>
       </div>
       <button type="submit" class="primary-btn" id="plan-generate-btn">Generate Plan</button>
       <div class="error-box" id="plan-error"></div>
@@ -1133,7 +1163,7 @@
         <div id="plan-status-log"></div>
       </div>
     </form>
-    <div class="hint">Uses your OpenRouter API key from Settings. The call goes straight from this page to OpenRouter — nothing passes through any server of mine.</div>
+    <div class="hint">Uses your OpenRouter API key from Settings, calling OpenRouter directly — nothing passes through any server of mine.</div>
     </details>
   </div>
 
@@ -1147,7 +1177,7 @@
           <option value="kg">Kilograms (kg)</option>
           <option value="lb">Pounds (lb)</option>
         </select>
-        <div class="hint">Everything is stored in kg internally — this only changes how weights are entered and displayed. Switching is instant and doesn't touch any logged history.</div>
+        <div class="hint">Only changes how weights are entered and displayed — everything is stored in kg internally, and switching never touches logged history.</div>
       </div>
     </form>
 
@@ -1160,7 +1190,9 @@
           <option value="intermediate">Intermediate — adding weight about weekly; session-to-session has stalled</option>
           <option value="advanced">Advanced — adding weight monthly at best; progress comes in blocks</option>
         </select>
-        <div class="hint">Pick the one that matches what's actually happening, not how long you've been training. The standard definition of these levels is how long you need to recover enough to add load — session, week, or block — and calendar time is only a rough proxy for it: novice progression typically runs 3–9 months but people burn through it anywhere from 8 weeks to well over a year. It's also per-lift, not global — most people are still novices on overhead press long after their squat isn't. This app already detects that part on its own from your logged history.</div>
+        <div class="hint">Pick the one matching what's actually happening now, not how long you've trained — this app also detects it per-lift from your logged history.
+          <details class="info"><summary aria-label="More about experience levels">?</summary><div class="info-text">The standard definition of these levels is how long you need to recover enough to add load — session, week, or block — and calendar time is only a rough proxy for it: novice progression typically runs 3–9 months but people burn through it anywhere from 8 weeks to well over a year. It's also per-lift, not global — most people are still novices on overhead press long after their squat isn't.</div></details>
+        </div>
         <div class="hint" id="experience-hint"></div>
       </div>
       <div class="field">
@@ -1170,17 +1202,19 @@
           <option value="female">Female</option>
           <option value="male">Male</option>
         </select>
-        <div class="hint">Used only as context for AI plan generation. It deliberately does <strong>not</strong> scale how fast weight is added — meta-analysis of controlled trials finds women's <em>relative</em> strength gains equal to men's in the lower body and slightly greater in the upper body. What does differ is absolute load, and the load-relative increments above already account for that without needing to know your sex.</div>
+        <div class="hint">Used only as AI plan-generation context — it deliberately does <strong>not</strong> change how fast weight is added.
+          <details class="info"><summary aria-label="Why sex doesn't affect progression rate">?</summary><div class="info-text">Meta-analysis of controlled trials finds women's <em>relative</em> strength gains equal to men's in the lower body and slightly greater in the upper body. What differs is absolute load, and the load-relative increments elsewhere in this form already account for that without needing to know your sex.</div></details>
+        </div>
       </div>
       <div class="field">
         <label for="setting-age">Age (optional)</label>
         <input type="number" id="setting-age" min="12" max="100" step="1" placeholder="e.g. 38">
-        <div class="hint">Applies a small taper to the progression rate past 40. Strength gains continue at every age — the rate and the recovery between sessions are what decline. The exact coefficients here are a judgment call, not a number lifted from a study.</div>
+        <div class="hint">Applies a small taper to the progression rate past 40 — a judgment call, not a number lifted from a study.</div>
       </div>
       <div class="field">
         <label for="setting-bodyweight">Bodyweight (<span id="bodyweight-unit">kg</span>, optional)</label>
         <input type="number" id="setting-bodyweight" min="0" step="0.5" placeholder="e.g. 80">
-        <div class="hint">Used to compute the real load on bodyweight and assisted exercises. A pull-up with +10 isn't a 10 lift, and an assisted pull-up at -45 isn't a -45 lift — without your bodyweight the percentage increments on those are computed off the wrong number entirely.</div>
+        <div class="hint">Used to compute the real load on bodyweight/assisted exercises — a +10 pull-up isn't a 10 lift without knowing what it's added to.</div>
       </div>
       <div class="field">
         <label for="setting-energy">Nutrition phase</label>
@@ -1189,7 +1223,7 @@
           <option value="deficit">Cutting (calorie deficit)</option>
           <option value="surplus">Bulking (calorie surplus)</option>
         </select>
-        <div class="hint">In a deficit, strength gains attenuate and <em>holding</em> load is a good result — so progression slows down and a session that repeats last week's numbers is reported as a win rather than a miss. Coefficients are a judgment call; the direction of the effect is well established.</div>
+        <div class="hint">In a deficit, <em>holding</em> load is a good result — progression slows, so repeating last week's numbers counts as a win, not a miss.</div>
       </div>
     </form>
 
@@ -1198,21 +1232,21 @@
       <div class="field">
         <label for="setting-rest">Default rest timer (seconds)</label>
         <input type="number" id="setting-rest" min="0" step="5" value="90">
-        <div class="hint">2–3 min suits heavy compounds; 60–90s is plenty for isolation work. It doesn't run after the set that finishes an exercise — moving to the next machine is the rest, and you set that pace yourself.</div>
+        <div class="hint">2–3 min suits heavy compounds; 60–90s is plenty for isolation work — it doesn't run after an exercise's last set.</div>
       </div>
       <div class="field">
         <label class="switch-row" for="setting-rest-enabled">
           <input type="checkbox" id="setting-rest-enabled" checked>
           <span>Show the rest timer after each set</span>
         </label>
-        <div class="hint">On by default. Turned off, logging a set records it and nothing else happens — no countdown, no sheet, no beep. The timer is a tool for people who rest to a clock; it shouldn't be mandatory furniture for people who don't.</div>
+        <div class="hint">On by default — turned off, logging a set just records it, with no countdown or sheet.</div>
       </div>
       <div class="field">
         <label class="switch-row" for="setting-rir-prompt">
           <input type="checkbox" id="setting-rir-prompt" checked>
           <span>Ask for reps in reserve after the last set</span>
         </label>
-        <div class="hint">On by default. Asks once per exercise, right after you log its final prescribed set — the moment you actually know the answer. Skipping is one tap and changes nothing; the value only ever speeds progression up when you report headroom to spare.</div>
+        <div class="hint">On by default — asks once per exercise, right after its last prescribed set; skipping is one tap and changes nothing.</div>
       </div>
       <div class="field">
         <label for="setting-seconds-per-set">Average time per set (seconds, optional)</label>
@@ -1241,7 +1275,9 @@
       <div class="field">
         <label>Smallest weight jump you can load</label>
         <div id="increment-grid" class="increment-grid"></div>
-        <div class="hint">Set per equipment type, because the jump is a property of the <em>implement</em>, not of you: a barbell with 1.25kg plates moves in 2.5kg steps, a dumbbell rack in 2kg or 5lb steps whatever you'd prefer, and a pin stack in 5kg steps regardless. Progression suggestions round to these, so they set the floor on how finely load can advance — and on light lifts that floor overrides your experience setting entirely. Each exercise picks up a type automatically from its name; correct any of them on the Exercises tab.</div>
+        <div class="hint">Set per equipment type — a barbell, dumbbell rack and pin stack all move in different-size steps, and this sets the floor on how finely load can advance.
+          <details class="info"><summary aria-label="More about weight-jump increments">?</summary><div class="info-text">The jump is a property of the <em>implement</em>, not of you: a barbell with 1.25kg plates moves in 2.5kg steps, a dumbbell rack in 2kg or 5lb steps whatever you'd prefer, and a pin stack in 5kg steps regardless. On light lifts, this floor overrides your experience setting entirely. Each exercise picks up a type automatically from its name; correct any of them on the Exercises tab.</div></details>
+        </div>
       </div>
     </form>
 
@@ -1250,21 +1286,15 @@
       <div class="field">
         <label for="setting-apikey">API key</label>
         <input type="password" id="setting-apikey" placeholder="sk-or-..." autocomplete="off" spellcheck="false">
-        <div class="hint" id="apikey-status">Saved on this device as soon as you leave the field. Stored unencrypted in this browser's own storage; anyone with access to this browser profile can read it. Use a spend-limited OpenRouter key.</div>
+        <div class="hint" id="apikey-status">No key stored yet — paste one above; it saves automatically, unencrypted, so use a spend-limited key.</div>
         <button type="button" class="ghost" id="forget-apikey">Forget key</button>
       </div>
       <div class="field">
         <label for="setting-model">Model</label>
         <input type="text" id="setting-model" placeholder="e.g. anthropic/claude-sonnet-4.5">
-        <div class="hint">Check openrouter.ai/models for current options and pricing — not hardcoding a default here since it goes stale.
-          <br><br><strong>Prefer a fast instruct model over a reasoning model.</strong>
-          This task is filling in a fixed JSON shape from a list you supply, which
-          is not what extended thinking is for: reasoning models bill their
-          thinking as output tokens, take far longer, and some finish a long
-          think without ever emitting the answer. If a reasoning model is the
-          one you want, that works — the status log below reports reasoning
-          separately from the answer, so you can see which one you are waiting
-          on.</div>
+        <div class="hint">Check openrouter.ai/models for current options and pricing — not hardcoded here since it goes stale.
+          <details class="info"><summary aria-label="Model choice advice">?</summary><div class="info-text"><strong>Prefer a fast instruct model over a reasoning model.</strong> This task fills in a fixed JSON shape from a supplied list, which isn't what extended thinking is for: reasoning models bill their thinking as output tokens, take far longer, and some finish a long think without ever emitting an answer. If a reasoning model is the one you want, that works — the status log below reports reasoning separately from the answer, so you can see which one you're waiting on.</div></details>
+        </div>
       </div>
     </form>
 
@@ -1285,12 +1315,12 @@
           <option value="ppl_upper_lower">Push/Pull/Legs + Upper/Lower Hybrid</option>
           <option value="custom">Custom — describe it yourself</option>
         </select>
-        <div class="hint">The presets are only shorthand: this setting does exactly one thing, which is add a sentence to the AI prompt describing how to structure the days. So anything you can describe in words works as well as a preset does.</div>
+        <div class="hint">Presets are just shorthand for a sentence added to the AI prompt — anything you can describe in words works as well.</div>
       </div>
       <div class="field" id="split-custom-field" style="display:none;">
         <label for="setting-plan-split-custom">Describe your split</label>
         <textarea id="setting-plan-split-custom" placeholder="e.g. Upper, Lower, Push, Pull, Legs — with arms doubled up on the upper day, and no overhead pressing"></textarea>
-        <div class="hint">Written straight into the prompt in place of the preset. Be as specific as you like about day order, what pairs with what, or anything to avoid. Left blank, the AI picks the structure itself.</div>
+        <div class="hint">Written straight into the prompt in place of a preset — left blank, the AI picks the structure itself.</div>
       </div>
     </form>
 
@@ -1306,7 +1336,9 @@
           <option value="merge">Merge — add these sets alongside</option>
           <option value="replace">Replace — overwrite sets for exercises in this file</option>
         </select>
-        <div class="hint">Merge is right for a first import. Choose Replace to re-import a file you've already loaded — for each day, it clears the existing sets of the exercises the file covers before writing, so nothing doubles up. Sets you logged in-app for exercises the file doesn't mention are left alone either way.</div>
+        <div class="hint">Merge is right for a first import; Replace re-imports a file you've already loaded without duplicating sets.
+          <details class="info"><summary aria-label="More about merge vs replace">?</summary><div class="info-text">Replace clears the existing sets of the exercises the file covers, for each day, before writing — so nothing doubles up. Sets you logged in-app for exercises the file doesn't mention are left alone either way.</div></details>
+        </div>
       </div>
       <div id="import-preview" style="display:none;">
         <div class="hint" id="import-preview-text" style="margin-top:0;"></div>
@@ -1324,12 +1356,7 @@
       <div class="field">
         <label>Export everything</label>
         <div class="hint" style="margin-top:0;">
-          Downloads a single <strong>.json</strong> file holding every workout,
-          exercise, preference, plan and setting on this device. This is the
-          only copy of your training history that isn't inside one browser's
-          storage — clearing site data erases the rest without asking.
-          <strong>Your OpenRouter API key is deliberately left out</strong>, so
-          the file is safe to put in cloud storage or email to yourself.
+          Downloads a single <strong>.json</strong> file with every workout, exercise, preference, plan and setting — <strong>your OpenRouter API key is deliberately left out</strong>, so it's safe for cloud storage or email.
         </div>
         <label class="switch-row" for="backup-encrypt" style="margin:10px 0 0;">
           <input type="checkbox" id="backup-encrypt">
@@ -1370,12 +1397,7 @@
       <div class="field">
         <label for="backup-file">Restore from a backup file</label>
         <input type="file" id="backup-file" accept=".json,application/json">
-        <div class="hint">Restore <strong>replaces everything</strong> on this
-          device with the contents of the file — it is for moving to a new
-          phone or recovering from a wipe, not for merging two devices. You'll
-          see exactly what is being swapped before anything is written. To
-          <em>add</em> history rather than replace it, use the Fitbod importer
-          above.</div>
+        <div class="hint">Restore <strong>replaces everything</strong> on this device — for a new phone or a wipe recovery, not for merging two devices.</div>
       </div>
       <div id="backup-decrypt-prompt" style="display:none;">
         <div class="storage-warning" style="display:block; margin-bottom:9px;">
@@ -1398,9 +1420,7 @@
       <div class="field">
         <label>Delete all workout history</label>
         <div class="hint" style="margin-top:0;">
-          Deletes every logged workout and nothing else — your exercise
-          catalog, preferences, plans and settings all survive. This cannot be
-          undone.
+          Deletes every logged workout only — catalog, preferences, plans and settings survive — and cannot be undone.
         </div>
         <label class="switch-row" for="history-clear-backup-first" style="margin:9px 0 0;">
           <input type="checkbox" id="history-clear-backup-first" checked>

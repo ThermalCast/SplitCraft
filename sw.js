@@ -16,7 +16,7 @@
 // Nothing here touches workout data. All of that lives in IndexedDB, which the
 // service worker neither sees nor caches — clearing this cache costs you a
 // download, never a training log.
-const VERSION = 'splitcraft-v1';
+const VERSION = 'splitcraft-v2';
 
 // Bump VERSION on deploy. The install step precaches this list; the activate
 // step deletes every cache that isn't the current VERSION, so an old shell

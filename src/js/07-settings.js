@@ -411,19 +411,26 @@
   }
 
   // States what the pace currently is and where it came from. Without this the
-  // per-exercise estimates are unexplainable numbers on a screen.
+  // per-exercise estimates are unexplainable numbers on a screen. The
+  // reasoning behind the fallback/override behavior lives in the "?" info
+  // bubble next to this hint in page.html, not duplicated here.
+  // Info-bubble markup is appended INSIDE the same innerHTML string, not as a
+  // sibling element in page.html — the "?" has to sit on the very end of the
+  // live sentence it explains, and a static sibling would either land on its
+  // own line (details.info is display:inline, but that only pulls the "?"
+  // onto the PRECEDING text's line, not a separate element's) or get out of
+  // sync with whichever branch of the sentence below actually rendered.
+  const PACE_INFO = '<details class="info"><summary aria-label="More about per-set time">?</summary><div class="info-text">Individual exercises get their own timing once each has enough logged set intervals; until then everything uses this one figure, and entering a value overrides all of it. This counts only the set itself and the rest after it — moving between exercises is priced separately, below.</div></details>';
+  const GYM_TYPE_INFO = '<details class="info"><summary aria-label="More about gym type and setup time">?</summary><div class="info-text">Home isn\'t automatically faster: no queue, but one bar and one bench mean a real changeover every time — that\'s why the combo option sits close to a commercial gym, and only dedicated stations are properly quick.</div></details>';
+  const SETUP_INFO = '<details class="info"><summary aria-label="More about setup time">?</summary><div class="info-text">Covers walking to the station, waiting for it, changing pins or reloading a bar, and the warm-up set you do there but never log. Order of precedence: a number typed here, then what your own logs show, then the gym-type setting above.</div></details>';
+  const SESSION_LENGTH_INFO = '<details class="info"><summary aria-label="More about target session length">?</summary><div class="info-text">Given in minutes because that\'s the real constraint — the app converts it to a working-set budget using how long your own logged sessions actually take, then asks plan generation for roughly that many sets per day.</div></details>';
+
   async function refreshPaceHint() {
     const el = document.getElementById('pace-hint');
     if (!el) return;
     const pace = await sessionPace();
     const secs = Math.round(pace.minutesPerSet * 60);
-    const known = pace.byExercise ? [...pace.byExercise.values()].filter(v => v.length >= EXERCISE_MIN_SAMPLES).length : 0;
-    el.innerHTML = `Leave blank and this is measured from your own logs \u2014 currently <strong>${secs}s per set</strong> (${esc(pace.source)}). `
-      + (known
-        ? `${known} exercise${known === 1 ? ' has' : 's have'} enough history for their own individual timing; everything else, including anything you add today, uses this figure.`
-        : `Individual exercises get their own timing once each has ${EXERCISE_MIN_SAMPLES} logged set intervals. Until then everything uses this one number, so a brand-new custom exercise still estimates sensibly.`)
-      + ` Enter a value to override all of it.`
-      + ` <strong>Counts only the set itself and the rest after it</strong> — moving between exercises is priced separately below.`;
+    el.innerHTML = `Leave blank to measure this from your own logs — currently <strong>${secs}s per set</strong> (${esc(pace.source)}).${PACE_INFO}`;
   }
 
   async function refreshGymTypeHint() {
@@ -433,13 +440,11 @@
     const mins = GYM_SETUP_MINUTES[gymType] ?? DEFAULT_SETUP_MINUTES;
     const pace = await sessionPace();
     const superseded = pace.setupSource !== 'where you train';
-    el.innerHTML = `Sets the starting guess for setup time between exercises — ${esc(GYM_TYPE_NOTE[gymType] || '')}. `
-      + `That works out at <strong>${Math.round(mins * 60)}s per exercise</strong>, about ${Math.round(mins * 8)} minutes across an eight-exercise day. `
-      + `Home isn't automatically faster: no queue, but one bar and one bench means a real changeover every time, `
-      + `which is why the combo option sits close to a commercial gym and only dedicated stations are properly quick. `
+    el.innerHTML = `Starting guess for setup time between exercises — <strong>${Math.round(mins * 60)}s per exercise</strong>, about ${Math.round(mins * 8)} min across an 8-exercise day. `
       + (superseded
         ? `<strong>Not currently in use</strong> — ${esc(pace.setupSource)} is more specific and takes precedence.`
-        : `Replaced automatically once ${TRANSITION_MIN_SAMPLES} exercise changes have been logged inside a timed session.`);
+        : `Replaced automatically once ${TRANSITION_MIN_SAMPLES} exercise changes have been logged.`)
+      + GYM_TYPE_INFO;
   }
 
   async function refreshSetupHint() {
@@ -447,11 +452,7 @@
     if (!el) return;
     const pace = await sessionPace();
     const secs = Math.round(pace.minutesPerSetup * 60);
-    el.innerHTML = `Charged <strong>once per exercise</strong>, on top of the per-set time above: walking to the station, `
-      + `waiting for it, changing the pins or stripping and reloading a bar, and the warm-up set you do there but never log. `
-      + `Currently <strong>${secs}s</strong> (${esc(pace.setupSource)}). `
-      + `Precedence is: a number you type here, then what your own logs show, then the setting above. `
-      + `An eight-exercise day spends about ${Math.round(pace.minutesPerSetup * 8)} minutes here, which is why leaving it out of the estimate made sessions look far shorter than they are.`;
+    el.innerHTML = `Charged once per exercise, on top of the per-set time above — currently <strong>${secs}s</strong> (${esc(pace.setupSource)}).${SETUP_INFO}`;
   }
 
   async function refreshSessionLengthHint() {
@@ -459,7 +460,7 @@
     if (!el) return;
     const budget = await sessionSetBudget();
     if (!budget) {
-      el.textContent = 'How long you actually have. Left blank, plan generation makes no assumption about session length. Given in minutes because that is the real constraint — the app converts it to a working-set budget using how long your own logged sessions take.';
+      el.innerHTML = `How long you actually have — left blank, plan generation makes no assumption about session length.${SESSION_LENGTH_INFO}`;
       return;
     }
     // The arithmetic is shown rather than asserted, because the answer got
@@ -469,12 +470,7 @@
     const setup = Math.round(budget.minutesPerSetup * 60);
     const fixed = Math.round(budget.fixedMinutes);
     const exercises = Math.max(1, Math.round(budget.sets / AVG_SETS_PER_EXERCISE));
-    el.innerHTML = `Works out to about <strong>${budget.sets} working sets</strong>, roughly ${exercises} exercises. `
-      + `That is ${fixed} min getting started, plus ~${setup}s of setup for each exercise, plus ~${perSet}s for each set. `
-      + `Plan generation is asked for roughly that many sets per day.`
-      + (budget.measured
-        ? ` Per-set time comes from ${esc(budget.source)}.`
-        : ` Per-set time is still estimated from your ${await getSetting('restDefault', 90)}s rest setting plus ~30s under tension; it switches to your real pace once there are enough logged intervals.`);
+    el.innerHTML = `Works out to about <strong>${budget.sets} working sets</strong> (~${exercises} exercises) — ${fixed} min getting started, ~${setup}s setup per exercise, ~${perSet}s per set.${SESSION_LENGTH_INFO}`;
   }
 
   function refreshBodyweightField() {
@@ -487,23 +483,20 @@
     input.value = bodyweightKg ? Math.round(fromKg(bodyweightKg) * 10) / 10 : '';
   }
 
+  // The "why percentages, not fixed jumps" reasoning is appended as a "?"
+  // info bubble at the end of this same innerHTML string, not a sibling
+  // element in page.html — it has to ride along with wherever this live
+  // sentence actually ends up.
+  const EXPERIENCE_PCT_INFO = '<details class="info"><summary aria-label="Why percentages instead of fixed jumps">?</summary><div class="info-text">Percentages rather than fixed plate jumps, because a small fixed jump is a much bigger percentage change on a light lift than a heavy one. When the percentage works out smaller than the smallest jump the equipment allows, you get that jump <em>less often</em> instead of a bigger one — so the average rate still lands on target, and age, nutrition phase and reported reps-in-reserve keep mattering at loads where rounding would otherwise erase them.</div></details>';
   function refreshExperienceHint() {
     const el = document.getElementById('experience-hint');
     if (!el) return;
     const level = document.getElementById('setting-experience').value;
     const pct = PROGRESSION_PCT[level] || PROGRESSION_PCT.intermediate;
     const needed = PROGRESSION_SESSIONS[level] || 1;
-    // Quoted against the barbell step: it is the class most people care about,
-    // and naming one concrete number beats averaging seven.
-    const step = Math.round(fromKg(loadStepKg({ equipment: 'barbell' })) * 100) / 100;
-    el.innerHTML = `Sets how fast load is added once you clear the top of the rep range: `
-      + `about <strong>${(pct.lower * 100).toFixed(1)}%</strong> on lower-body lifts and `
+    el.innerHTML = `Currently: about <strong>${(pct.lower * 100).toFixed(1)}%</strong> on lower-body lifts and `
       + `<strong>${(pct.upper * 100).toFixed(1)}%</strong> on upper-body lifts, `
-      + `after a minimum of <strong>${needed} clean session${needed === 1 ? '' : 's'}</strong> in a row. `
-      + `Percentages rather than fixed plate jumps because +2.5${weightUnit} is 2.5% of a 100${weightUnit} squat but 12.5% of a 20${weightUnit} press. `
-      + `When that percentage works out smaller than the smallest jump the equipment allows (${step}${weightUnit} for barbells, per your settings), `
-      + `you get that jump <em>less often</em> instead of a bigger one — so the average rate still lands on target, and your age, `
-      + `nutrition phase and reported reps-in-reserve keep mattering at loads where rounding would otherwise erase them.`;
+      + `after <strong>${needed} clean session${needed === 1 ? '' : 's'}</strong> in a row.${EXPERIENCE_PCT_INFO}`;
   }
 
   document.getElementById('setting-experience').addEventListener('change', async (e) => {
@@ -531,7 +524,7 @@
     const sets = Math.max(4, perSetCost > 0 ? Math.round((minutes - pace.fixedMinutes) / perSetCost) : 0);
     el.innerHTML = `Works out to about <strong>${sets} working sets</strong> — ${Math.round(pace.fixedMinutes)} min getting started, `
       + `~${Math.round(pace.minutesPerSetup * 60)}s setup per exercise, ~${Math.round(pace.minutesPerSet * 60)}s per set`
-      + `${pace.measured ? '' : ' (per-set time still estimated — no logged intervals yet)'}.`;
+      + `${pace.measured ? '' : ' (per-set time still estimated — no logged intervals yet)'}.${SESSION_LENGTH_INFO}`;
   });
 
   // The key is saved on `change` (i.e. on blur, if the value actually
@@ -565,8 +558,8 @@
     const key = await getSetting('openrouterKey', '');
     const where = dbAvailable ? 'IndexedDB + localStorage' : 'localStorage only (IndexedDB unavailable)';
     el.textContent = key
-      ? `Key stored (${key.length} chars, ends "${key.slice(-4)}") in ${where}. It will persist across reloads on this device. Stored unencrypted — anyone with access to this browser profile can read it, so use a spend-limited OpenRouter key.`
-      : 'No key stored. Paste one above — it saves as soon as you leave the field. It is kept unencrypted in this browser, so use a spend-limited OpenRouter key.';
+      ? `Key stored (${key.length} chars, ends "${key.slice(-4)}") in ${where} — unencrypted, so use a spend-limited key.`
+      : 'No key stored yet — paste one above; it saves automatically, unencrypted, so use a spend-limited key.';
   }
 
   async function loadSettingsIntoForm() {

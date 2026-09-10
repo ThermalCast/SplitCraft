@@ -303,6 +303,14 @@
     const field = document.getElementById('split-custom-field');
     if (!sel || !field) return;
     field.style.display = sel.value === 'custom' ? '' : 'none';
+    // scrollHeight reads 0 on a display:none element, so the init()-time
+    // auto-grow pass over this textarea (12-init.js) was a no-op while this
+    // field started out hidden — a saved multi-line value would otherwise
+    // stay clipped to the CSS default height until the next keystroke.
+    if (sel.value === 'custom') {
+      const textarea = document.getElementById('setting-plan-split-custom');
+      if (textarea) autoGrowTextarea(textarea);
+    }
   }
   document.getElementById('setting-plan-split').addEventListener('change', async (e) => {
     refreshSplitCustomVisibility();

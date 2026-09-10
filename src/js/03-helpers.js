@@ -157,6 +157,26 @@
   });
 
   // =========================================================================
+  // Auto-growing textareas (Plan tab's Equipment/Notes, the custom-split
+  // field in Settings) — height tracks content instead of scrolling a fixed
+  // 62px box. `resize: none` only gets set once this actually runs, so a
+  // browser where it fails for some reason (or the Node test harness, whose
+  // stub elements have no real scrollHeight) is left with the CSS fallback:
+  // the ordinary vertical drag-handle resize .field textarea already had.
+  // =========================================================================
+  function autoGrowTextarea(el) {
+    el.style.height = 'auto';
+    el.style.height = el.scrollHeight + 'px';
+  }
+  function wireAutoGrowTextareas() {
+    document.querySelectorAll('textarea').forEach(el => {
+      el.style.resize = 'none';
+      el.addEventListener('input', () => autoGrowTextarea(el));
+    });
+  }
+  wireAutoGrowTextareas();
+
+  // =========================================================================
   // Toast — transient confirmation that doesn't shift layout the way the
   // inline .success-box divs do (those stay for messages worth re-reading,
   // like the import summary).

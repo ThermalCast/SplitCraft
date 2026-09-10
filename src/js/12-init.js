@@ -83,6 +83,11 @@
     await loadSettings();
     await loadSettingsIntoForm();
     await loadPlanFormFromSettings();
+    // Textareas are sized on `input`, which programmatic value-setting above
+    // never fires — so a loaded note that's already several lines long would
+    // otherwise stay clipped to the CSS default height until the next
+    // keystroke. Resize every one now that its real value is in place.
+    document.querySelectorAll('textarea').forEach(autoGrowTextarea);
     await syncDefaultExercises();
     await populateExerciseSelect();
     timerRemaining = await getSetting('restDefault', 90);
