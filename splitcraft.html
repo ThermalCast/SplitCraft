@@ -8177,8 +8177,9 @@
     // model's own judgment call on a bare "constraints" label or this app's
     // hypertrophy-tracking muscle tags to cover injury safety.
     const notesInstruction = notes
-      ? `\nHEALTH CONSTRAINT — read this first; it overrides every other instruction in this prompt, including the pinned/required-exercise lists below: "${notes}"\n`
-        + `If this describes an injury or physical limitation, exclude every exercise that loads, stabilizes through, or bears weight through the affected area — not only exercises that directly train it. This app's own exercise data tags each exercise's PRIMARY and visible secondary muscles for volume tracking, not every stabilizer, so do not rely on it to judge safety here: a calf strain, for example, also rules out standing barbell squats and lunges, since calves aren't the tracked muscle for those but they stabilize the ankle under load on every rep. When unsure whether a movement is safe, leave it out. Prefer seated, machine-based, or non-weight-bearing alternatives for the affected area, and drop a pinned or required exercise entirely rather than violate this constraint.\n`
+      ? `\nHEALTH CONSTRAINT — read this first; it overrides every other instruction in this prompt, including the pinned/required-exercise lists below AND the requested split structure: "${notes}"\n`
+        + `If this describes an injury or physical limitation, exclude every exercise that loads, stabilizes through, or bears weight through the affected area — not only exercises that directly train it. This app's own exercise data tags each exercise's PRIMARY and visible secondary muscles for volume tracking, not every stabilizer, so do not rely on it to judge safety here: a calf strain, for example, also rules out standing barbell squats and lunges, since calves aren't the tracked muscle for those but they stabilize the ankle under load on every rep. When unsure whether a movement is safe, leave it out.\n`
+        + `Do not let the requested split shape override this: if a conventional day for that split (e.g. a "Legs" day) would normally center on an exercise this constraint rules out, do NOT include it anyway to keep the day's theme intact. Fill that day with safe alternatives that train the same muscles without the risky movement pattern instead (e.g. leg curls, hip thrusts, leg extensions, glute bridges, hip abduction/adduction machine work for a lower-body day, none of which load the injured area the way a standing loaded squat or lunge does), and only give that day fewer exercises than usual if no safe alternative exists in the provided list. Prefer seated, machine-based, or non-weight-bearing alternatives for the affected area generally, and drop a pinned or required exercise entirely rather than violate this constraint.\n`
       : '';
 
     // Both numbers go in. The minutes are the user's real constraint; the set
@@ -8265,6 +8266,25 @@ ${schemaExample}`;
           createdExerciseIds.push(newId);
         }
         ex.exerciseId = match.id;
+      }
+      // DISLIKED IS ENFORCED HERE, NOT JUST REQUESTED IN THE PROMPT.
+      //
+      // Disliked exercises are dropped from the candidate list the model is
+      // shown, but "you MUST choose exclusively from this list" is still
+      // just an instruction — a model that decides an excluded exercise
+      // belongs anyway (this is exactly how a health-constraint note can
+      // fail: the model judges a movement safe/appropriate and includes it
+      // regardless of what it was told to avoid) will name it, and byName
+      // above is deliberately built from EVERY exercise so that name still
+      // resolves to the existing disliked record instead of spawning a
+      // duplicate custom one. That match is the hook needed to catch and
+      // drop it here, after generation, rather than only hoping the model
+      // never says the name — the one place in this function that isn't
+      // purely prompt-and-trust.
+      const before = day.exercises.length;
+      day.exercises = day.exercises.filter(e => !dislikedIds.has(e.exerciseId));
+      if (day.exercises.length < before) {
+        logPlanStatus(`Removed ${before - day.exercises.length} exercise(s) from "${day.name || 'a day'}" that are marked disliked — enforced regardless of what the model chose.`);
       }
     }
 

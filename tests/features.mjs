@@ -1035,6 +1035,59 @@ check('no prompt when there is no plan yet', promptBox.hidden === true);
 }
 
 // ---------------------------------------------------------------------------
+// Disliked exercises are enforced after generation, not just requested in the
+// prompt. Disliking an exercise removes it from the candidate list the model
+// is shown, but "choose exclusively from this list" is still just an
+// instruction — this is exactly the failure mode a health-constraint note
+// hits too (the model judges a movement acceptable and includes it anyway).
+// A model that names a disliked exercise regardless must have it stripped
+// from the saved plan, since this is the one exclusion mechanism meant to be
+// an actual guarantee rather than a request the model can overrule.
+// ---------------------------------------------------------------------------
+{
+  await app.syncDefaultExercises();
+  await seedDemoData(app);
+  const all1 = await app.getAllRecords('exercises');
+  const squatId = all1.find(e => e.name === 'Back Squat').id;
+  await app.setExercisePref(squatId, { disliked: true });
+
+  let calls = 0;
+  app.fetch = async (url, opts) => {
+    calls++;
+    // The model ignores the "MUST choose exclusively from this list"
+    // instruction and names the disliked exercise anyway, alongside a safe
+    // one in the same day.
+    const payload = calls === 1
+      ? { days: [{ name: 'Legs', exercises: [
+          { name: 'Back Squat', targetSets: 3, repRangeMin: 6, repRangeMax: 10 },
+          { name: 'Leg Press', targetSets: 3, repRangeMin: 8, repRangeMax: 12 },
+        ] }] }
+      : { estimates: [] };
+    return { ok: true, status: 200, statusText: 'OK', body: null,
+      json: async () => ({ choices: [{ message: { content: JSON.stringify(payload) } }] }) };
+  };
+  await app.setSetting('openrouterKey', 'sk-or-test');
+  await app.setSetting('openrouterModel', 'test/model');
+  const plan = await app.generatePlanWithAI({ goal: 'Strength', daysPerWeek: 3, equipment: '',
+    notes: 'calf strain, avoid the calf', repRangeMin: 6, repRangeMax: 10, splitType: 'auto', fixedSets: null });
+
+  const legsDay = plan.days.find(d => d.name === 'Legs');
+  check('a disliked exercise the model names anyway is dropped from the saved plan',
+    !!legsDay && !legsDay.exercises.some(e => e.name === 'Back Squat'),
+    JSON.stringify(legsDay && legsDay.exercises.map(e => e.name)));
+  check('the rest of that day survives the drop',
+    !!legsDay && legsDay.exercises.some(e => e.name === 'Leg Press'),
+    JSON.stringify(legsDay && legsDay.exercises.map(e => e.name)));
+
+  const after1 = await app.getAllRecords('exercises');
+  check('the disliked name resolves to the existing record rather than spawning a duplicate',
+    after1.filter(e => e.name === 'Back Squat').length === 1,
+    `${after1.filter(e => e.name === 'Back Squat').length} "Back Squat" record(s)`);
+
+  await app.setExercisePref(squatId, { disliked: false }); // leave state clean for later tests
+}
+
+// ---------------------------------------------------------------------------
 // Clear workout history — the permanent Backup & restore control
 // (`clearWorkoutHistory()`, in 06-catalog-import-backup.js) that deletes
 // logged workouts and nothing else.

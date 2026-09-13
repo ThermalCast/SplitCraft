@@ -1030,12 +1030,19 @@ backed by the separate `exercisePrefs` store. Like and dislike are mutually
 exclusive with each other; disliking clears any pin (can't pin something
 excluded); pinning clears any dislike.
 
-All three are **prompt-only** — no post-processing of the AI's response,
-keeping generation behavior legible from the prompt itself, at the cost of
-inclusion relying on the model following instructions.
-- **Disliked → hard exclusion**: filtered out of the prompt's exercise list
-  entirely, so the model cannot choose them. Applies to manual Plan-tab Swap
-  too, not just generation.
+Pinned and liked are **prompt-only** — no post-processing of the AI's
+response, keeping generation behavior legible from the prompt itself, at the
+cost of inclusion relying on the model following instructions.
+- **Disliked → hard exclusion, enforced on parse, not merely requested**:
+  filtered out of the prompt's exercise list so the model isn't offered them,
+  AND stripped from the parsed response afterward if the model names one
+  anyway (matched against the full, undislike-filtered library so the name
+  resolves to the existing disliked record instead of spawning a duplicate
+  custom one). A health-constraint note asking the AI to avoid a muscle is
+  still just a strongly-worded request the model can disagree with; disliking
+  the specific exercise(s) that would aggravate it is the one lever in this
+  app that's an actual guarantee rather than an appeal to the model's
+  judgment. Applies to manual Plan-tab Swap too, not just generation.
 - **Pinned → always required**: every pinned exercise is listed with an
   explicit "you MUST include every single one of these," every generation.
 - **Liked → required about half the time, per exercise**: each liked
