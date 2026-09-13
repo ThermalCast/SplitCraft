@@ -436,6 +436,24 @@
     const profileInstruction = `Lifter: ${experience} (${{ novice: 'can still add load nearly every session', intermediate: 'adds load about weekly; session-to-session progress has stalled', advanced: 'adds load monthly at best; progress comes in blocks' }[experience] || 'experience unstated'})`
       + (sex === 'unspecified' ? '.' : `, ${sex}.`);
 
+    // Injury/constraint notes were losing two ways: stated as one line among
+    // a dozen others, they read as a preference rather than a limit, and
+    // nothing told the model they outrank the MUST-include pinned/liked
+    // instructions below when the two collide. Worse, this app's own
+    // exercise data only tags PRIMARY-MOVER muscles for volume tracking —
+    // Back Squat is tagged quads/glutes, never calves — so a model checking
+    // notes against that taxonomy has no way to know squats load the
+    // calf/ankle complex too. A user with a calf strain got a plan that
+    // correctly dropped Calf Raise and then prescribed Back Squat anyway.
+    // The fix is spelling out indirect/stabilizer loading explicitly, with
+    // that exact case as a worked example, rather than trusting either the
+    // model's own judgment call on a bare "constraints" label or this app's
+    // hypertrophy-tracking muscle tags to cover injury safety.
+    const notesInstruction = notes
+      ? `\nHEALTH CONSTRAINT — read this first; it overrides every other instruction in this prompt, including the pinned/required-exercise lists below: "${notes}"\n`
+        + `If this describes an injury or physical limitation, exclude every exercise that loads, stabilizes through, or bears weight through the affected area — not only exercises that directly train it. This app's own exercise data tags each exercise's PRIMARY and visible secondary muscles for volume tracking, not every stabilizer, so do not rely on it to judge safety here: a calf strain, for example, also rules out standing barbell squats and lunges, since calves aren't the tracked muscle for those but they stabilize the ankle under load on every rep. When unsure whether a movement is safe, leave it out. Prefer seated, machine-based, or non-weight-bearing alternatives for the affected area, and drop a pinned or required exercise entirely rather than violate this constraint.\n`
+      : '';
+
     // Both numbers go in. The minutes are the user's real constraint; the set
     // budget is the only half a model can actually check itself against,
     // since it can't know how long anyone rests. Derived from this lifter's
@@ -451,13 +469,13 @@
     // The split is reported as TEXT rather than as its key: "custom" tells
     // the user nothing, and this log exists so they can see what was asked.
     logPlanStatus(`Built prompt (${allExercises.length} exercises in library, rep range ${repRangeMin}-${repRangeMax}, sets: ${fixedSets ? `fixed at ${fixedSets}` : 'AI chooses'}, split: ${splitText || 'AI chooses'}${budget ? `, ~${budget.minutes}min / ~${budget.sets} sets per day` : ''}).`);
+    if (notes) logPlanStatus(`Health constraint given top priority in the prompt: "${notes}"`);
 
     const prompt = `Design a ${daysPerWeek}-day-per-week weight training split for the goal: ${goal}.
-${splitInstruction}
+${notesInstruction}${splitInstruction}
 ${profileInstruction}
 ${lengthInstruction}Available equipment: ${equipment || 'standard commercial gym'}.
-Notes/constraints: ${notes || 'none'}.
-Target rep range for working sets: ${repRangeMin}-${repRangeMax} reps, unless the goal clearly calls for a different range on a specific exercise (e.g. heavier, lower-rep compound work for a Strength goal).
+${notes ? '' : 'Notes/constraints: none.\n'}Target rep range for working sets: ${repRangeMin}-${repRangeMax} reps, unless the goal clearly calls for a different range on a specific exercise (e.g. heavier, lower-rep compound work for a Strength goal).
 ${setsInstruction}
 You MUST choose exercises exclusively from this existing exercise list — use the exact names as written, do not invent new ones:
 ${exerciseListText}
