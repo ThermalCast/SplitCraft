@@ -1088,6 +1088,65 @@ check('no prompt when there is no plan yet', promptBox.hidden === true);
 }
 
 // ---------------------------------------------------------------------------
+// "Previous plan" (fed to the AI so the next generation varies from it) must
+// mean previously TRAINED, not merely previously generated — a plan that was
+// disliked and regenerated before a single set was ever logged against it
+// isn't a meaningful variety signal. Fully isolated from whatever plans/
+// workouts earlier tests left behind, since this needs a deterministic
+// "nothing used yet" starting point rather than luck about suite ordering.
+// ---------------------------------------------------------------------------
+{
+  for (const p of await app.getAllRecords('plans')) await app.deleteRecord('plans', p.id);
+  await app.clearWorkoutHistory();
+
+  const legPressId = (await app.getAllRecords('exercises')).find(e => e.name === 'Leg Press').id;
+  const unusedPlanId = await app.addRecord('plans', {
+    createdAt: Date.now(), goal: 'Hypertrophy', daysPerWeek: 3, equipment: '', notes: '',
+    repRangeMin: 8, repRangeMax: 12, fixedSets: null,
+    days: [{ name: 'Legs', exercises: [{ exerciseId: legPressId, name: 'Leg Press', targetSets: 3, repRangeMin: 8, repRangeMax: 12 }] }]
+  });
+
+  // A real (if minimal) day rather than `days: []` — an empty-days plan left
+  // behind would become "the current plan" for every test running after this
+  // one (getCurrentPlan() just takes the most recently created), which is a
+  // self-inflicted mess this test has no business leaving behind.
+  const minimalPlanFetch = async () => ({ ok: true, status: 200, statusText: 'OK', body: null,
+    json: async () => ({ choices: [{ message: { content: JSON.stringify({ days: [
+      { name: 'Day 1', exercises: [{ name: 'Push-Up', targetSets: 3, repRangeMin: 8, repRangeMax: 12 }] }
+    ] }) } }] }) });
+
+  let prompt1 = null;
+  app.fetch = async (url, opts) => { prompt1 = prompt1 || JSON.parse(opts.body).messages[1].content; return minimalPlanFetch(); };
+  await app.generatePlanWithAI({ goal: 'Hypertrophy', daysPerWeek: 3, equipment: '', notes: '',
+    repRangeMin: 8, repRangeMax: 12, splitType: 'auto', fixedSets: null });
+
+  // "Leg Press" alone isn't a valid check — it's also a normal catalog
+  // exercise and always appears in the "choose exclusively from this list"
+  // section regardless of previous-plan logic. What must be absent is the
+  // previous-plan BLOCK itself.
+  check('an unused plan is NOT offered to the AI as "previous"',
+    !!prompt1 && !prompt1.includes("Here is the user's previous plan"),
+    prompt1 && prompt1.includes("Here is the user's previous plan") ? 'prompt still includes a previous-plan block' : 'no call made');
+
+  // Now actually train that plan: log one set against it, the same link the
+  // Log tab writes (workout.planId) when a set is logged against a plan day.
+  await app.addRecord('workouts', {
+    date: '2026-01-01', ts: Date.now(), planId: unusedPlanId, dayIndex: 0, dayName: 'Legs',
+    exercises: [{ exerciseId: legPressId, sets: [{ weight: 100, reps: 10 }] }]
+  });
+
+  let prompt2 = null;
+  app.fetch = async (url, opts) => { prompt2 = prompt2 || JSON.parse(opts.body).messages[1].content; return minimalPlanFetch(); };
+  await app.generatePlanWithAI({ goal: 'Hypertrophy', daysPerWeek: 3, equipment: '', notes: '',
+    repRangeMin: 8, repRangeMax: 12, splitType: 'auto', fixedSets: null });
+
+  const previousPlanBlock2 = prompt2 && prompt2.split("Here is the user's previous plan")[1];
+  check('a plan with a logged set against it IS offered to the AI as "previous"',
+    !!previousPlanBlock2 && previousPlanBlock2.includes('Leg Press'),
+    prompt2 ? (previousPlanBlock2 ? 'block present but missing Leg Press' : 'no previous-plan block included') : 'no call made');
+}
+
+// ---------------------------------------------------------------------------
 // Clear workout history — the permanent Backup & restore control
 // (`clearWorkoutHistory()`, in 06-catalog-import-backup.js) that deletes
 // logged workouts and nothing else.

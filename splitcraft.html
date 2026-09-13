@@ -8141,7 +8141,23 @@
       : `Choose whatever day structure/split best fits the goal and days per week.`;
 
     const existingPlans = await getAllRecords('plans');
-    const previousPlan = existingPlans.length ? existingPlans.sort((a, b) => b.createdAt - a.createdAt)[0] : null;
+    // "Previous plan" means previously TRAINED, not merely previously
+    // GENERATED. The most recently created plan is normally the one this
+    // call is about to replace — including one just generated minutes ago,
+    // disliked, and regenerated without a single set ever logged against it
+    // (exactly what testing this feature looks like). Steering the model
+    // away from a plan nobody actually did isn't a real variety signal, so a
+    // plan only counts as "previous" here once it has at least one logged
+    // set — checked via workouts.planId, the same link the Log tab writes
+    // when a set is logged against a plan day.
+    const workoutsForVariety = await getAllWorkouts();
+    const usedPlanIds = new Set(
+      workoutsForVariety
+        .filter(w => w.planId != null && w.exercises.some(ex => ex.sets.length > 0))
+        .map(w => w.planId)
+    );
+    const usedPlans = existingPlans.filter(p => usedPlanIds.has(p.id));
+    const previousPlan = usedPlans.length ? usedPlans.sort((a, b) => b.createdAt - a.createdAt)[0] : null;
     const previousPlanText = previousPlan
       ? previousPlan.days.map(d => `${d.name}: ${d.exercises.map(e => e.name).join(', ')}`).join('\n')
       : '';
@@ -8150,7 +8166,9 @@
       : '';
     logPlanStatus(previousPlan
       ? `Including previous plan (${previousPlan.days.length} days, generated ${new Date(previousPlan.createdAt).toLocaleDateString()}) to steer toward variety.`
-      : 'No previous plan found — first-time generation.');
+      : existingPlans.length > 0
+        ? `${existingPlans.length} previous plan record(s) exist but none has a logged set yet — skipping the variety comparison.`
+        : 'No previous plan found — first-time generation.');
     const schemaExample = '{"days":[{"name":"Day 1 - Push","exercises":[{"name":"Barbell Bench Press","targetSets":4,"repRangeMin":6,"repRangeMax":10}]}]}';
     // A fixed set count removes one of the model's two levers for hitting the
     // session budget, so the remaining one has to be named explicitly or it

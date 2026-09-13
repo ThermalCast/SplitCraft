@@ -1015,7 +1015,13 @@ be typed.
   (tagged `unclassified`) if the model deviates anyway.
 - **Previous plan is included for variety**: the most recently generated
   plan (day names and exercise lists only) is summarized into the prompt
-  with an instruction to vary from it. First-ever generation skips this.
+  with an instruction to vary from it — but only a plan actually **trained
+  from** counts as "previous". A plan with zero logged workouts against it
+  (checked via `workouts.planId`, same link the Log tab writes when a set is
+  logged) is skipped even if it's the newest record, since a plan generated,
+  disliked, and immediately regenerated was never really "what the user did
+  last" — it's just the model's last attempt. Skipped entirely if no plan
+  has ever been trained from (covers first-ever generation too).
 - Prompt requests strict JSON against a documented schema; response is
   parsed defensively (strips markdown fences, try/catch, validates `days` is
   an array), with user-facing errors mapped from OpenRouter's documented
