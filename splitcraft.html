@@ -8166,20 +8166,24 @@
     // Injury/constraint notes were losing two ways: stated as one line among
     // a dozen others, they read as a preference rather than a limit, and
     // nothing told the model they outrank the MUST-include pinned/liked
-    // instructions below when the two collide. Worse, this app's own
-    // exercise data only tags PRIMARY-MOVER muscles for volume tracking —
-    // Back Squat is tagged quads/glutes, never calves — so a model checking
-    // notes against that taxonomy has no way to know squats load the
-    // calf/ankle complex too. A user with a calf strain got a plan that
-    // correctly dropped Calf Raise and then prescribed Back Squat anyway.
-    // The fix is spelling out indirect/stabilizer loading explicitly, with
-    // that exact case as a worked example, rather than trusting either the
-    // model's own judgment call on a bare "constraints" label or this app's
-    // hypertrophy-tracking muscle tags to cover injury safety.
+    // instructions below when the two collide. This app's own exercise data
+    // only tags PRIMARY-MOVER muscles for volume tracking too (Back Squat is
+    // tagged quads/glutes, never calves), so it can't be used to judge injury
+    // safety the way it's used elsewhere in this prompt for pinned exercises.
+    //
+    // A first version of this instruction spelled out a specific worked
+    // example (a calf strain ruling out standing squats/lunges) to make the
+    // "not just the directly-trained muscle" point concrete. Deliberately
+    // genericized back out: a hardcoded example is pattern-matching on one
+    // injury, not a general fix, and this is being tested without it to see
+    // whether the general instruction alone is enough for a capable model.
+    // If it isn't, the real fix is a verification pass over the generated
+    // plan (a second call checking output against the stated constraint),
+    // not a bigger pile of injury-specific examples here.
     const notesInstruction = notes
       ? `\nHEALTH CONSTRAINT — read this first; it overrides every other instruction in this prompt, including the pinned/required-exercise lists below AND the requested split structure: "${notes}"\n`
-        + `If this describes an injury or physical limitation, exclude every exercise that loads, stabilizes through, or bears weight through the affected area — not only exercises that directly train it. This app's own exercise data tags each exercise's PRIMARY and visible secondary muscles for volume tracking, not every stabilizer, so do not rely on it to judge safety here: a calf strain, for example, also rules out standing barbell squats and lunges, since calves aren't the tracked muscle for those but they stabilize the ankle under load on every rep. When unsure whether a movement is safe, leave it out.\n`
-        + `Do not let the requested split shape override this: if a conventional day for that split (e.g. a "Legs" day) would normally center on an exercise this constraint rules out, do NOT include it anyway to keep the day's theme intact. Fill that day with safe alternatives that train the same muscles without the risky movement pattern instead (e.g. leg curls, hip thrusts, leg extensions, glute bridges, hip abduction/adduction machine work for a lower-body day, none of which load the injured area the way a standing loaded squat or lunge does), and only give that day fewer exercises than usual if no safe alternative exists in the provided list. Prefer seated, machine-based, or non-weight-bearing alternatives for the affected area generally, and drop a pinned or required exercise entirely rather than violate this constraint.\n`
+        + `If this describes an injury or physical limitation, exclude every exercise that loads, stabilizes through, or bears weight through the affected area — not only exercises that directly train it. This app's own exercise data tags each exercise's PRIMARY and visible secondary muscles for volume tracking, not every stabilizer or joint involved, so don't rely on it to judge safety here — reason about it directly. When unsure whether a movement is safe, leave it out.\n`
+        + `Do not let the requested split shape override this: if a conventional day for that split (e.g. a "Legs" day) would normally center on an exercise this constraint rules out, do NOT include it anyway to keep the day's theme intact. Fill that day with safe alternatives that train the same muscles without the risky movement pattern instead, and only give that day fewer exercises than usual if no safe alternative exists in the provided list. Prefer seated, machine-based, or non-weight-bearing alternatives for the affected area generally, and drop a pinned or required exercise entirely rather than violate this constraint.\n`
       : '';
 
     // Both numbers go in. The minutes are the user's real constraint; the set
