@@ -335,6 +335,27 @@
   // flag makes the second call fail loudly instead of duplicating the spend.
   let planGenerationInFlight = false;
 
+  // The exact text of the last plan-generation request, kept so it can be
+  // inspected on demand (see view-prompt-btn below) instead of taken on
+  // faith. Set right after the prompt is assembled — before the network call
+  // — so it's there to check even when the request itself fails or a field
+  // the user expected to see (like Notes) turns out empty or misplaced.
+  let lastPlanPromptText = null;
+  function renderViewPromptButton() {
+    document.getElementById('view-prompt-btn').hidden = !lastPlanPromptText;
+  }
+  document.getElementById('view-prompt-btn').addEventListener('click', () => {
+    if (!lastPlanPromptText) return;
+    document.getElementById('prompt-modal-body').textContent = lastPlanPromptText;
+    document.getElementById('prompt-modal').hidden = false;
+  });
+  document.getElementById('prompt-modal-close').addEventListener('click', () => {
+    document.getElementById('prompt-modal').hidden = true;
+  });
+  document.getElementById('prompt-modal').addEventListener('click', (e) => {
+    if (e.target.id === 'prompt-modal') document.getElementById('prompt-modal').hidden = true;
+  });
+
   async function generatePlanWithAI({ goal, daysPerWeek, equipment, notes, repRangeMin, repRangeMax, splitType, fixedSets }) {
     if (planGenerationInFlight) {
       throw new Error('A plan is already being generated — wait for it to finish before starting another.');
@@ -444,9 +465,17 @@ ${pinnedInstruction}${requiredLikedInstruction}${previousPlanInstruction}For eac
 Respond with ONLY valid JSON, no markdown fences, no commentary, exactly matching this shape:
 ${schemaExample}`;
 
+    const systemMsg = 'You are a strength training coach. You respond only with valid JSON, never markdown or prose.';
+    // Captured verbatim, before the network call, so "View the full prompt"
+    // always reflects exactly what was (or was about to be) sent — including
+    // on a failed or errored generation, which is usually the case someone
+    // wants to check.
+    lastPlanPromptText = `SYSTEM:\n${systemMsg}\n\nUSER:\n${prompt}`;
+    renderViewPromptButton();
+
     const content = await aiChat({
       apiKey, model,
-      system: 'You are a strength training coach. You respond only with valid JSON, never markdown or prose.',
+      system: systemMsg,
       user: prompt
     });
     let parsed;

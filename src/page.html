@@ -851,6 +851,47 @@
     padding: 10px 12px; max-height: 170px; overflow-y: auto;
     font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); line-height: 1.65;
   }
+  button.view-prompt-btn {
+    background: none; border: 1px dashed var(--border-strong); color: var(--text-dim);
+    border-radius: var(--r-sm); font-family: inherit; font-size: 12px; font-weight: 600;
+    padding: 8px 12px; cursor: pointer; margin-top: 9px; width: 100%;
+  }
+  button.view-prompt-btn:active { color: var(--accent); border-color: var(--accent-line); }
+  button.view-prompt-btn[hidden] { display: none !important; }
+
+  /* Full-prompt popup — lets a mismatch between what a field says and what
+     the AI actually receives be checked directly, instead of taken on faith.
+     A plain fixed overlay rather than <dialog>: nothing else in this codebase
+     uses <dialog>, and the show/hide-via-[hidden] pattern already used by the
+     rest-timer sheet and the week-plan banner works here with no new API. */
+  .prompt-modal {
+    position: fixed; inset: 0; z-index: 70;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex; align-items: center; justify-content: center; padding: 18px;
+  }
+  .prompt-modal[hidden] { display: none !important; }
+  .prompt-modal-card {
+    background: var(--surface-2); border: 1px solid var(--border-strong);
+    border-radius: var(--r-lg); box-shadow: var(--shadow-lg);
+    width: 100%; max-width: 640px; max-height: 82vh;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .prompt-modal-header {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 13px 15px; border-bottom: 1px solid var(--border); flex: 0 0 auto;
+  }
+  .prompt-modal-header h3 { margin: 0; font-size: 14px; font-weight: 700; color: var(--text); }
+  .prompt-modal-close {
+    background: none; border: 1px solid var(--border); color: var(--text-dim);
+    border-radius: var(--r-sm); font-size: 17px; line-height: 1; cursor: pointer;
+    padding: 3px 10px; flex: 0 0 auto; min-width: var(--tap); min-height: var(--tap);
+  }
+  .prompt-modal-close:active { color: var(--accent); border-color: var(--accent-line); }
+  .prompt-modal-body {
+    padding: 13px 15px; overflow-y: auto; margin: 0;
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.65; color: var(--text-dim);
+    white-space: pre-wrap; word-break: break-word;
+  }
 
   /* ===== History: summary strip ===== */
   .summary-grid {
@@ -1162,6 +1203,7 @@
       <div class="status-log" id="plan-status-log-card">
         <div id="plan-status-log"></div>
       </div>
+      <button type="button" class="view-prompt-btn" id="view-prompt-btn" hidden>View the full prompt sent to the AI</button>
     </form>
     <div class="hint">Uses your OpenRouter API key from Settings, calling OpenRouter directly — nothing passes through any server of mine.</div>
     </details>
@@ -1465,6 +1507,18 @@
   </div>
 
   <div id="toast-host"></div>
+
+  <!-- Shows exactly what was sent to the AI for the last plan generation
+       attempt, system message and all — see view-prompt-btn above. -->
+  <div class="prompt-modal" id="prompt-modal" hidden>
+    <div class="prompt-modal-card">
+      <div class="prompt-modal-header">
+        <h3>Full prompt sent to the AI</h3>
+        <button type="button" class="prompt-modal-close" id="prompt-modal-close" aria-label="Close">×</button>
+      </div>
+      <pre class="prompt-modal-body" id="prompt-modal-body"></pre>
+    </div>
+  </div>
 
   <!-- Rest timer. Was a permanent card at the top of the workout tab, which
        gave the single largest element on the page to something that matters
