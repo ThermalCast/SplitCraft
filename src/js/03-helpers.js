@@ -33,7 +33,7 @@
   // conversion happens, at the UI boundary. Weight input fields therefore
   // always expect/show values in this unit, converting to/from kg only when
   // reading from or writing to storage.
-  let weightUnit = 'kg';
+  let weightUnit = 'lb';
   function toKg(displayWeight) { return weightUnit === 'lb' ? displayWeight * KG_PER_LB : displayWeight; }
   function fromKg(weightKg) { return weightUnit === 'lb' ? weightKg / KG_PER_LB : weightKg; }
   function displayWeight(weightKg) { return Math.round(fromKg(weightKg) * 10) / 10; }

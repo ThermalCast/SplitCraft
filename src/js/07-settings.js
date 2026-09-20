@@ -586,7 +586,7 @@
     document.getElementById('setting-plan-split').value = await getSetting('planSplitType', 'auto');
     document.getElementById('setting-plan-split-custom').value = await getSetting('planSplitCustom', '');
     refreshSplitCustomVisibility();
-    weightUnit = await getSetting('weightUnit', 'kg');
+    weightUnit = await getSetting('weightUnit', 'lb');
     document.getElementById('setting-weight-unit').value = weightUnit;
     // These three are last and in this order: the default increment depends
     // on the unit, the select's options depend on the unit, and the hint

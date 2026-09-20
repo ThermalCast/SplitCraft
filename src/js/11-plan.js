@@ -507,26 +507,56 @@ Respond with ONLY valid JSON, no markdown fences, no commentary, exactly matchin
 ${schemaExample}`;
 
     const systemMsg = 'You are a strength training coach. You respond only with valid JSON, never markdown or prose.';
-    // Captured verbatim, before the network call, so "View the full prompt"
-    // always reflects exactly what was (or was about to be) sent — including
-    // on a failed or errored generation, which is usually the case someone
-    // wants to check.
-    lastPlanPromptText = `SYSTEM:\n${systemMsg}\n\nUSER:\n${prompt}`;
-    renderViewPromptButton();
 
-    const content = await aiChat({
-      apiKey, model,
-      system: systemMsg,
-      user: prompt
-    });
+    // PINNED IS CHECKED HERE, WITH ONE RETRY — not force-injected like
+    // disliked exercises are force-REMOVED, because a pin can legitimately
+    // lose: the health-constraint note above outranks it by design, and a
+    // model that (correctly) drops a pinned exercise for safety reasons is
+    // doing its job, not failing it. So the response only gets handed back
+    // to the model once, with the specific gap named, and whatever comes
+    // back after that — pin honored or not — is accepted rather than
+    // fought with again. A second silent drop reads as "the health note
+    // wins," which is the one case this app has already decided is correct.
     let parsed;
-    try { parsed = JSON.parse(content); }
-    catch (e) {
-      logPlanStatus(`Raw response (unparsable): ${content.slice(0, 300)}`);
-      throw new Error('Could not parse the AI response as JSON \u2014 try again.');
+    let userMsg = prompt;
+    let attempt = 0;
+    while (true) {
+      attempt++;
+      // Captured verbatim, before each network call, so "View the full
+      // prompt" always reflects exactly what was (or was about to be) sent
+      // — including on a failed or errored generation, which is usually the
+      // case someone wants to check.
+      lastPlanPromptText = `SYSTEM:\n${systemMsg}\n\nUSER:\n${userMsg}`;
+      renderViewPromptButton();
+
+      const content = await aiChat({
+        apiKey, model,
+        system: systemMsg,
+        user: userMsg
+      });
+      try { parsed = JSON.parse(content); }
+      catch (e) {
+        logPlanStatus(`Raw response (unparsable): ${content.slice(0, 300)}`);
+        throw new Error('Could not parse the AI response as JSON \u2014 try again.');
+      }
+      if (!parsed.days || !Array.isArray(parsed.days)) throw new Error('AI response was missing the expected "days" list.');
+      logPlanStatus(`Got ${parsed.days.length} day(s) back. Matching exercises against your library\u2026`);
+
+      if (!pinnedExercises.length) break;
+      const namesInPlan = new Set();
+      for (const day of parsed.days) {
+        if (!Array.isArray(day.exercises)) continue;
+        for (const ex of day.exercises) namesInPlan.add(nameKey(ex && ex.name));
+      }
+      const missingPinned = pinnedExercises.filter(e => !namesInPlan.has(nameKey(e.name)));
+      if (!missingPinned.length) break;
+      if (attempt > 1) {
+        logPlanStatus(`Pinned exercise(s) still missing after one retry \u2014 keeping this plan as generated (likely overridden by the health constraint): ${missingPinned.map(e => e.name).join(', ')}.`);
+        break;
+      }
+      logPlanStatus(`Pinned exercise(s) missing from the plan: ${missingPinned.map(e => e.name).join(', ')} \u2014 asking the AI to try again (once).`);
+      userMsg = `${prompt}\n\nIMPORTANT: your previous response left out these pinned exercise(s): ${missingPinned.map(e => e.name).join(', ')}. Include each of them this time, on a day that trains its primary muscle group \u2014 UNLESS the health constraint above genuinely rules it out for safety, in which case leaving it out again is correct.`;
     }
-    if (!parsed.days || !Array.isArray(parsed.days)) throw new Error('AI response was missing the expected "days" list.');
-    logPlanStatus(`Got ${parsed.days.length} day(s) back. Matching exercises against your library\u2026`);
 
     const byName = new Map(allExercises.map(e => [nameKey(e.name), e]));
     // Exercise records created below for names the library didn't already

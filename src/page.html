@@ -913,8 +913,21 @@
   .chart-bar.dim { fill: var(--surface-3); }
   .chart-line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
   .chart-line.est { stroke: var(--text-dim); stroke-width: 1.5; stroke-dasharray: 3 3; }
-  .chart-dot { fill: var(--accent); }
+  /* pointer-events: none — this sits ON TOP of chart-dot-hit in paint order
+     (see lineChartSVG) and would otherwise swallow clicks aimed at its own
+     center, which is exactly where a precise tap lands. Purely decorative. */
+  .chart-dot { fill: var(--accent); pointer-events: none; }
+  .chart-dot.active { fill: var(--text); stroke: var(--accent); stroke-width: 1.5; }
+  /* The actual tap/hover target — larger and invisible, since a fingertip
+     can't reliably hit the 2.6px-radius dot drawn on top of it. */
+  .chart-dot-hit { fill: transparent; cursor: pointer; }
   .chart-area { fill: var(--accent-soft); }
+  /* Populated on tap (see PROGRESS_CHART_ACTIONS) since a dot's native SVG
+     <title> tooltip never shows on a touch screen — there's no hover. */
+  .chart-readout {
+    color: var(--text); font-size: 12.5px; font-weight: 600; margin-top: 8px;
+    min-height: 1.4em;
+  }
   .chart-legend {
     display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 10px;
     font-size: 11px; color: var(--text-faint);

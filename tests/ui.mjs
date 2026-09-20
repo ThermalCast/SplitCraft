@@ -31,6 +31,15 @@ check('panel-exercises (renderExerciseManager) rendered without throwing',
   typeof app.document.getElementById('exercise-manager-list').innerHTML === 'string'
   && app.document.getElementById('exercise-manager-list').innerHTML.length > 0);
 
+// seedDemoData's most recent session (1 day ago) is Pull (dayIndex 1) on a
+// 4-day Push/Pull/Legs/Upper plan, with nothing logged today — the day
+// picker's default should rotate to Legs (dayIndex 2), not reset to day 0.
+// Must run before anything below logs a set for today, which would give
+// today its own dayIndex and short-circuit the rotation this is checking.
+check('the day picker defaults to the day after the last one trained (Pull → Legs), not day 0',
+  app.document.getElementById('log-day-picker').value === '2',
+  app.document.getElementById('log-day-picker').value);
+
 // Handlers guard on `isNaN(parseFloat(input.value))` and bail early, so an
 // empty stub input means the interesting half of the handler never runs.
 // Give everything a plausible number first.

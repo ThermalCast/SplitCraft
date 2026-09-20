@@ -111,6 +111,15 @@
   // see the row/button attributes below.
   let activeWorkoutCtx = null;
 
+  // Which exercise's History panel / Swap picker is open, keyed by the
+  // effective exercise id \u2014 same pattern as expandedExercises (05-history.js)
+  // and for the same reason: renderActiveWorkout() rebuilds this whole
+  // section's innerHTML on every logged set, so without tracking it here a
+  // panel opened to check "what did I do last time" on one exercise would
+  // snap shut the moment a DIFFERENT exercise's set was logged.
+  const openHistoryPanels = new Set();
+  const openSwapPickers = new Set();
+
   const WORKOUT_CLICK_ACTIONS = {
     'log-set': async (el) => {
       if (el.disabled) return;
@@ -182,27 +191,37 @@
       if (!group) return;
       const panel = group.querySelector('.ex-history');
       if (!panel) return;
+      const id = Number(group.dataset.exid);
       const opening = panel.style.display !== 'block';
       // Rendered on first open, not on every repaint. Most exercises in a
       // session never have this opened, and building it for all of them
       // would add another pass over the whole workout history to the path
       // that already runs on every single logged set.
       if (opening && panel.dataset.rendered !== 'yes') {
-        const id = Number(group.dataset.exid);
         const { allWorkouts, exercisesById } = activeWorkoutCtx;
         panel.innerHTML = exerciseHistoryHtml(id, allWorkouts, exercisesById[id]);
         panel.dataset.rendered = 'yes';
       }
       panel.style.display = opening ? 'block' : 'none';
       el.setAttribute('aria-expanded', opening ? 'true' : 'false');
+      // Tracked the same way expandedExercises tracks collapse state, so a
+      // panel opened for THIS exercise survives the next set logged against
+      // a DIFFERENT one — renderActiveWorkout() rebuilds the whole list on
+      // every logged set, and without this the panel silently closed itself
+      // mid-review.
+      if (opening) openHistoryPanels.add(id); else openHistoryPanels.delete(id);
     },
     'swap-open': async (el) => {
       const group = el.closest('.exercise-group');
       if (!group) return;
       const picker = group.querySelector('.swap-picker');
       if (!picker) return;
-      await ensureSwapOptions(picker.querySelector('.swap-select'), Number(group.dataset.exid));
-      picker.style.display = picker.style.display === 'block' ? 'none' : 'block';
+      const id = Number(group.dataset.exid);
+      await ensureSwapOptions(picker.querySelector('.swap-select'), id);
+      const opening = picker.style.display !== 'block';
+      picker.style.display = opening ? 'block' : 'none';
+      // See the matching comment on openHistoryPanels above — same reason.
+      if (opening) openSwapPickers.add(id); else openSwapPickers.delete(id);
     },
     'adjust-sets': async (el) => {
       const group = el.closest('.exercise-group');
@@ -383,24 +402,28 @@
       // completed rows -- and every log rebuilt the list under you.
       //
       // `expandedExercises` survives the re-render, so re-opening one to fix
-      // a mis-logged set doesn't snap shut on the next refresh.
+      // a mis-logged set doesn't snap shut on the next refresh. `openHistoryPanels`
+      // / `openSwapPickers` do the same for the History panel and Swap picker
+      // below \u2014 see their declaration up top.
       const setSummary = todaySets.map(st => formatSetLine(st)).join(' \u00b7 ');
+      const historyOpen = openHistoryPanels.has(effectiveExerciseId);
+      const swapOpen = openSwapPickers.has(effectiveExerciseId);
       rows.push(`
         <div class="exercise-group${isComplete ? ' complete' : ''}${isOpen ? '' : ' collapsed'}" data-exid="${effectiveExerciseId}" data-orig-exid="${ex.exerciseId}" data-target="${effectiveTarget}">
           <div class="ex-name">
             <span>${isComplete ? '<span class="ex-tick">\u2713</span> ' : ''}${esc(effectiveName)}${isSwapped ? ` <span class="override-note">swapped today</span>` : ''}</span>
             <span class="ex-actions">
-              <button type="button" class="hist-btn" data-action="show-history" aria-expanded="false" aria-label="Previous sessions of ${esc(effectiveName)}" title="Previous sessions">History</button>
+              <button type="button" class="hist-btn" data-action="show-history" aria-expanded="${historyOpen}" aria-label="Previous sessions of ${esc(effectiveName)}" title="Previous sessions">History</button>
               ${isComplete
                 ? `<button type="button" class="ex-toggle" data-action="toggle-exercise" aria-expanded="${isOpen}" aria-label="${isOpen ? 'Collapse' : 'Expand'} ${esc(effectiveName)}" title="${isOpen ? 'Collapse' : 'Expand to edit'}">${isOpen ? '\u2303' : '\u2304'}</button>`
                 : `<button type="button" class="swap-btn" data-action="swap-open">Swap</button>`}
             </span>
           </div>
           ${isComplete && !isOpen ? `<div class="meta-row ex-digest">${esc(setSummary)}</div>` : ''}
-          <div class="swap-picker">
+          <div class="swap-picker"${swapOpen ? ' style="display:block"' : ''}>
             <select class="swap-select" data-action="swap-select" aria-label="Swap ${esc(effectiveName)} for today"></select>
           </div>
-          <div class="ex-history"></div>
+          <div class="ex-history"${historyOpen ? ' style="display:block" data-rendered="yes"' : ''}>${historyOpen ? exerciseHistoryHtml(effectiveExerciseId, allWorkouts, exercisesById[effectiveExerciseId]) : ''}</div>
           <div class="meta-row">
             <button type="button" class="today-set-adj" data-action="adjust-sets" data-delta="-1" data-plan-target="${ex.targetSets}" title="Skip a set today \u2014 reverts automatically next time this day comes around">\u2212</button>
             <span>${effectiveTarget} sets \u00d7 ${ex.repRangeMin}-${ex.repRangeMax} reps</span>
@@ -423,6 +446,18 @@
     }
     container.innerHTML = rows.join('');
 
+    // Reopened pickers (see openSwapPickers above) render already visible
+    // via the inline style baked into the markup, but the <select> itself
+    // is still empty — ensureSwapOptions() is what a click normally does,
+    // called here instead so the picker isn't visible-but-blank after a set
+    // gets logged on another exercise.
+    for (const exid of openSwapPickers) {
+      const group = container.querySelector(`.exercise-group[data-exid="${exid}"]`);
+      if (!group) { openSwapPickers.delete(exid); continue; }
+      const picker = group.querySelector('.swap-picker');
+      if (picker) await ensureSwapOptions(picker.querySelector('.swap-select'), exid);
+    }
+
     // After a log the list shrinks -- completed exercises collapse and the
     // page gets shorter -- and the browser clamps the scroll position to the
     // new maximum, which is what dumped the user at the bottom of the page.
@@ -439,6 +474,22 @@
     delegate(container, 'change', WORKOUT_CHANGE_ACTIONS);
     delegate(container, 'input', WORKOUT_INPUT_ACTIONS);
   }
+
+  // Weight/rep fields select their whole value on focus, so tapping into one
+  // that already has a number in it (a suggested weight, a logged set being
+  // corrected) replaces it outright. Without this, a tap drops the cursor at
+  // the tap point and the phone's numeric keypad inserts into or appends onto
+  // what's already there — a stray leading/trailing digit is the normal
+  // result, not a clean overwrite. A capturing `focus` listener on `document`
+  // rather than `delegate()`: this runs on every render (the whole list is
+  // rebuilt), so it is registered once, here, at module load, instead of
+  // per-render.
+  document.addEventListener('focus', (e) => {
+    const t = e.target;
+    if (t && t.matches && t.matches('.plan-log-weight, .plan-log-reps, .set-edit-weight, .set-edit-reps')) {
+      t.select();
+    }
+  }, true);
 
   // Owns the Log tab's day-picker + active-workout list. Keeps the user's
   // in-session day choice sticky (selectedLogDayIdx) across re-renders
@@ -464,8 +515,30 @@
       const todayWorkout = workouts
         ? workouts.find(w => w.date === todayStr()) || null
         : await getWorkoutForDate(todayStr());
-      selectedLogDayIdx = (todayWorkout && todayWorkout.planId === plan.id && todayWorkout.dayIndex != null)
-        ? todayWorkout.dayIndex : 0;
+      if (todayWorkout && todayWorkout.planId === plan.id && todayWorkout.dayIndex != null) {
+        // Already logged something today against this plan — show whatever
+        // day that was, not wherever the rotation below would otherwise land.
+        selectedLogDayIdx = todayWorkout.dayIndex;
+      } else {
+        // Nothing logged yet today: advance to the day AFTER whichever one
+        // was last actually trained against THIS plan, so the split rotates
+        // on its own (Push, Pull, Legs, Push, ...) instead of resetting to
+        // day 0 every morning nothing's been logged yet. Scoped to plan.id
+        // rather than "the last workout of any kind" because regenerating a
+        // plan always creates a new id (see generatePlanWithAI) — an old
+        // plan's day count/order can't be assumed to line up with this
+        // one's, so a fresh plan correctly starts back at day 0 instead of
+        // inheriting a stale index from whatever came before it. A session
+        // only counts if it actually has a logged set — a started-but-empty
+        // one (warm-up timer tapped, nothing logged) shouldn't advance the
+        // rotation past a day that never really happened.
+        const allWorkouts = workouts || await getAllWorkouts();
+        const lastForPlan = allWorkouts
+          .filter(w => w.planId === plan.id && w.dayIndex != null && w.date !== todayStr()
+            && w.exercises.some(ex => ex.sets.length > 0))
+          .sort((a, b) => b.date.localeCompare(a.date) || (b.ts || 0) - (a.ts || 0))[0];
+        selectedLogDayIdx = lastForPlan ? (lastForPlan.dayIndex + 1) % plan.days.length : 0;
+      }
     }
     daySelect.innerHTML = plan.days.map((d, i) => `<option value="${i}">${esc(d.name)}</option>`).join('');
     daySelect.value = String(selectedLogDayIdx);

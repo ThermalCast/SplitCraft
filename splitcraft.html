@@ -913,8 +913,21 @@
   .chart-bar.dim { fill: var(--surface-3); }
   .chart-line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
   .chart-line.est { stroke: var(--text-dim); stroke-width: 1.5; stroke-dasharray: 3 3; }
-  .chart-dot { fill: var(--accent); }
+  /* pointer-events: none — this sits ON TOP of chart-dot-hit in paint order
+     (see lineChartSVG) and would otherwise swallow clicks aimed at its own
+     center, which is exactly where a precise tap lands. Purely decorative. */
+  .chart-dot { fill: var(--accent); pointer-events: none; }
+  .chart-dot.active { fill: var(--text); stroke: var(--accent); stroke-width: 1.5; }
+  /* The actual tap/hover target — larger and invisible, since a fingertip
+     can't reliably hit the 2.6px-radius dot drawn on top of it. */
+  .chart-dot-hit { fill: transparent; cursor: pointer; }
   .chart-area { fill: var(--accent-soft); }
+  /* Populated on tap (see PROGRESS_CHART_ACTIONS) since a dot's native SVG
+     <title> tooltip never shows on a touch screen — there's no hover. */
+  .chart-readout {
+    color: var(--text); font-size: 12.5px; font-weight: 600; margin-top: 8px;
+    min-height: 1.4em;
+  }
   .chart-legend {
     display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 10px;
     font-size: 11px; color: var(--text-faint);
@@ -2632,7 +2645,7 @@
   // conversion happens, at the UI boundary. Weight input fields therefore
   // always expect/show values in this unit, converting to/from kg only when
   // reading from or writing to storage.
-  let weightUnit = 'kg';
+  let weightUnit = 'lb';
   function toKg(displayWeight) { return weightUnit === 'lb' ? displayWeight * KG_PER_LB : displayWeight; }
   function fromKg(weightKg) { return weightUnit === 'lb' ? weightKg / KG_PER_LB : weightKg; }
   function displayWeight(weightKg) { return Math.round(fromKg(weightKg) * 10) / 10; }
@@ -3018,33 +3031,35 @@
   // 'suspended' on mobile; resume() on each use covers the case where it was
   // suspended later by the OS backgrounding the tab.
   let audioCtx = null;
+  // Shared by unlockAudio() and beep() below: both need a live, resumed
+  // context and neither cares which of them actually constructs it.
+  function ensureAudioCtx() {
+    try {
+      const Ctor = window.AudioContext || window.webkitAudioContext;
+      if (!Ctor) return null;
+      if (!audioCtx) audioCtx = new Ctor();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      return audioCtx;
+    } catch (e) { return null; /* audio not available — non-fatal */ }
+  }
   // iOS only unlocks Web Audio when the context is created (or resumed)
   // synchronously inside a user-gesture handler; building it lazily on the
   // first beep — which fires from a setInterval tick, not a gesture — is
   // silently ignored there. startRestTimer() always runs inside a Log tap,
   // so it calls this to create/resume the context while still inside that
   // gesture; beep() then just reuses whatever context this left behind.
-  function unlockAudio() {
-    try {
-      const Ctor = window.AudioContext || window.webkitAudioContext;
-      if (!Ctor) return;
-      if (!audioCtx) audioCtx = new Ctor();
-      if (audioCtx.state === 'suspended') audioCtx.resume();
-    } catch (e) { /* audio not available — non-fatal */ }
-  }
+  function unlockAudio() { ensureAudioCtx(); }
   function beep() {
+    const ctx = ensureAudioCtx();
+    if (!ctx) return;
     try {
-      const Ctor = window.AudioContext || window.webkitAudioContext;
-      if (!Ctor) return;
-      if (!audioCtx) audioCtx = new Ctor();
-      if (audioCtx.state === 'suspended') audioCtx.resume();
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.connect(gain); gain.connect(audioCtx.destination);
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
       osc.frequency.value = 880;
-      gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+      gain.gain.setValueAtTime(0.2, ctx.currentTime);
       osc.start();
-      osc.stop(audioCtx.currentTime + 0.3);
+      osc.stop(ctx.currentTime + 0.3);
     } catch (e) { /* audio not available — non-fatal */ }
   }
 
@@ -3226,6 +3241,11 @@
   // still save immediately on Log, independent of session state)
   // =========================================================================
   let sessionTickInterval = null;
+  // Set only while a running session's interval is torn down for being
+  // hidden, so the visibilitychange listener below knows to restart it on
+  // return without also firing (and reading the store) on every tab switch
+  // while no session is running at all.
+  let sessionWasRunning = false;
 
   async function refreshSessionCard() {
     clearInterval(sessionTickInterval);
@@ -3268,6 +3288,25 @@
   document.getElementById('session-complete-btn').addEventListener('click', async () => {
     await completeWorkoutSession();
     await refreshLogAndHistory();
+  });
+
+  // A running session's tick has nowhere useful to run while the tab is
+  // hidden — the element it updates isn't seen, and a backgrounded tab
+  // throttles setInterval anyway (same reasoning as the rest timer above,
+  // just without a deadline to resync from: elapsed-since-start is exact on
+  // any tick, throttled or not). Torn down on hide and rebuilt on return
+  // instead of left running unseen for the rest of the session.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (sessionTickInterval) {
+        clearInterval(sessionTickInterval);
+        sessionTickInterval = null;
+        sessionWasRunning = true;
+      }
+    } else if (sessionWasRunning) {
+      sessionWasRunning = false;
+      refreshSessionCard();
+    }
   });
 
   // 05-history.js — Log + History rendering, charts, refreshLogAndHistory
@@ -3555,14 +3594,30 @@
       out += `<path class="chart-line ${s.cls || ''}" d="${d}"/>`;
       if (s.dots) {
         s.points.forEach(p => {
-          out += `<circle class="chart-dot" cx="${X(p.t).toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="2.6"><title>${esc(p.label)}</title></circle>`;
+          // The hit target is bigger (r=9) than the visible dot (r=2.6) and
+          // drawn FIRST — a fingertip can't reliably land on a 2.6px point.
+          // It carries both the tap handler (data-action/data-label, for a
+          // touch screen, which never fires a native SVG <title> tooltip)
+          // and the <title> itself (for a mouse hover). The visible dot on
+          // top is `pointer-events: none` (CSS) so it's purely decorative —
+          // without that, its own smaller circle would sit above the hit
+          // target in paint order and swallow exactly the clicks landing
+          // dead-center, which is exactly where a precise tap lands.
+          out += `<circle class="chart-dot-hit" data-action="chart-dot-tap" data-label="${esc(p.label)}" cx="${X(p.t).toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="9"><title>${esc(p.label)}</title></circle>`;
+          out += `<circle class="chart-dot" cx="${X(p.t).toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="2.6"/>`;
         });
       }
     });
-    if (ticks && ticks.length > 1) {
-      // A month start before tMin clamps to the axis so the leading partial
-      // month still gets named.
-      out += tickMarksSVG(ticks, tk => Math.max(padL, X(tk.t)), padT + plotH, H, W - padR);
+    // A month start before tMin used to be CLAMPED onto the left edge so the
+    // leading partial month still got named — but that draws its tick at a
+    // position that isn't actually the 1st of that month, which visibly
+    // compresses the gap to the next (honestly-placed) tick and reads as
+    // uneven spacing on an axis that's otherwise perfectly regular. Dropped
+    // instead: a partial first month goes unlabeled rather than mislabeled,
+    // and every tick that IS drawn sits at its true calendar position.
+    const onscreenTicks = (ticks || []).filter(tk => X(tk.t) >= padL - 0.5);
+    if (onscreenTicks.length > 1) {
+      out += tickMarksSVG(onscreenTicks, tk => X(tk.t), padT + plotH, H, W - padR);
     } else {
       // Range sits inside a single month — day labels say more than one
       // repeated month name would.
@@ -3790,6 +3845,30 @@
       <div class="hint" style="margin-top:8px;">Sets, not volume &mdash; volume is dominated by heavy compounds and zero for bodyweight work. Each set counts once, against its exercise's <em>primary</em> muscle only.</div>`;
   }
 
+  // A dot's own <title> only ever shows on a mouse hover, which a touch
+  // screen has no equivalent of — the one place in this chart genuinely
+  // unusable on a phone without this. Tapping (the invisible, larger
+  // chart-dot-hit circle drawn under each dot — see lineChartSVG) writes the
+  // point's date/value into a readout under the chart instead, and marks the
+  // tapped dot so it's clear which point the readout is describing.
+  const PROGRESS_CHART_ACTIONS = {
+    'chart-dot-tap': (hit) => {
+      const container = document.getElementById('chart-progress');
+      if (!container) return;
+      const readout = container.querySelector('.chart-readout');
+      if (readout) {
+        readout.textContent = hit.dataset.label || '';
+        readout.hidden = false;
+      }
+      container.querySelectorAll('.chart-dot.active').forEach(d => d.classList.remove('active'));
+      // The hit target and the visible dot are separate same-position
+      // circles (see lineChartSVG) so the readout highlights the sibling
+      // that's actually drawn, not the invisible one that was tapped.
+      const dot = hit.nextElementSibling;
+      if (dot && dot.classList) dot.classList.add('active');
+    }
+  };
+
   // Top set weight + estimated 1RM (Epley: w x (1 + reps/30)) per session.
   // Est. 1RM is the more honest progress signal — it moves when you add reps
   // at the same weight, which top-set weight alone can't show.
@@ -3879,11 +3958,13 @@
       : `${flat} across ${dates.length} sessions.`;
 
     el.innerHTML = svg + `
+      <div class="chart-readout" hidden></div>
       <div class="chart-legend">
         <span><i></i>${allPositive ? 'Top set' : 'Assisted load'} (${esc(weightUnit)})</span>
         ${allPositive ? '<span><i class="est"></i>Est. 1RM</span>' : '<span><i class="zero"></i>0 = unassisted</span>'}
       </div>
       <div class="hint" style="margin-top:6px;">${esc(trend)}</div>` + loadNote;
+    delegate(el, 'click', PROGRESS_CHART_ACTIONS);
   }
 
   document.getElementById('history-range').addEventListener('change', (e) => {
@@ -5394,6 +5475,20 @@
     // a render path gets checked here, before the button that wipes is even
     // offered.
     const fail = (msg) => { throw new Error(`Backup file is damaged — ${msg}. Nothing has been changed.`); };
+    d.exercises.forEach((ex, i) => {
+      if (!ex || typeof ex !== 'object') fail(`exercise ${i + 1} is not a record`);
+      if (!Number.isFinite(Number(ex.id))) fail(`exercise ${i + 1} has no id`);
+      if (typeof ex.name !== 'string' || !ex.name.trim()) fail(`exercise ${i + 1} has no name`);
+    });
+    // Built AFTER the loop above so it only ever contains ids that passed
+    // their own record check, then reused below to catch a DANGLING
+    // reference — a workout or plan exerciseId that looks fine on its own
+    // (numeric) but names no record in this same backup. Restore writes ids
+    // back verbatim (see applyRestore), so a dangling id here becomes a
+    // dangling id after restore too, surfacing exactly the way the comment
+    // above describes: your own data already gone, and a render that throws
+    // reaching into `exercisesById[missingId]`.
+    const exerciseIds = new Set(d.exercises.map(ex => Number(ex && ex.id)).filter(Number.isFinite));
     d.workouts.forEach((w, i) => {
       const where = `workout ${i + 1}${w && w.date ? ` (${w.date})` : ''}`;
       if (!w || typeof w !== 'object') fail(`${where} is not a record`);
@@ -5401,7 +5496,9 @@
       if (!Array.isArray(w.exercises)) fail(`${where} has no exercise list`);
       w.exercises.forEach((ex) => {
         if (!ex || typeof ex !== 'object') fail(`${where} contains an invalid exercise entry`);
-        if (!Number.isFinite(Number(ex.exerciseId))) fail(`${where} has an exercise with no id`);
+        const exerciseId = Number(ex.exerciseId);
+        if (!Number.isFinite(exerciseId)) fail(`${where} has an exercise with no id`);
+        if (!exerciseIds.has(exerciseId)) fail(`${where} references exercise id ${exerciseId}, which isn't in this backup's exercise list`);
         if (!Array.isArray(ex.sets)) fail(`${where} has an exercise with no set list`);
         ex.sets.forEach((s) => {
           if (!s || !Array.isArray(s.entries) || s.entries.length === 0) {
@@ -5415,15 +5512,15 @@
         });
       });
     });
-    d.exercises.forEach((ex, i) => {
-      if (!ex || typeof ex !== 'object') fail(`exercise ${i + 1} is not a record`);
-      if (!Number.isFinite(Number(ex.id))) fail(`exercise ${i + 1} has no id`);
-      if (typeof ex.name !== 'string' || !ex.name.trim()) fail(`exercise ${i + 1} has no name`);
-    });
     d.plans.forEach((p, i) => {
       if (!p || !Array.isArray(p.days)) fail(`plan ${i + 1} has no days list`);
       p.days.forEach((day) => {
         if (!day || !Array.isArray(day.exercises)) fail(`plan ${i + 1} has a day with no exercise list`);
+        day.exercises.forEach((ex) => {
+          const exerciseId = Number(ex && ex.exerciseId);
+          if (!Number.isFinite(exerciseId)) fail(`plan ${i + 1} has a day with an exercise that has no id`);
+          if (!exerciseIds.has(exerciseId)) fail(`plan ${i + 1} references exercise id ${exerciseId}, which isn't in this backup's exercise list`);
+        });
       });
     });
     return parsed;
@@ -6216,7 +6313,7 @@
     document.getElementById('setting-plan-split').value = await getSetting('planSplitType', 'auto');
     document.getElementById('setting-plan-split-custom').value = await getSetting('planSplitCustom', '');
     refreshSplitCustomVisibility();
-    weightUnit = await getSetting('weightUnit', 'kg');
+    weightUnit = await getSetting('weightUnit', 'lb');
     document.getElementById('setting-weight-unit').value = weightUnit;
     // These three are last and in this order: the default increment depends
     // on the unit, the select's options depend on the unit, and the hint
@@ -6927,7 +7024,6 @@
     if (lastRamped) why.push('top set');
     if (lastRir != null && lastRir >= 2) why.push(`${lastRir === 4 ? '4+' : lastRir} RIR left`);
     if (modifiers.energy === 'deficit') why.push('cutting');
-    if (modifiers.age >= 40) why.push(`age ${modifiers.age}`);
 
     if (metTop) {
       const nextWeightKg = lastWeightKg + increment;
@@ -7067,6 +7163,15 @@
   // see the row/button attributes below.
   let activeWorkoutCtx = null;
 
+  // Which exercise's History panel / Swap picker is open, keyed by the
+  // effective exercise id \u2014 same pattern as expandedExercises (05-history.js)
+  // and for the same reason: renderActiveWorkout() rebuilds this whole
+  // section's innerHTML on every logged set, so without tracking it here a
+  // panel opened to check "what did I do last time" on one exercise would
+  // snap shut the moment a DIFFERENT exercise's set was logged.
+  const openHistoryPanels = new Set();
+  const openSwapPickers = new Set();
+
   const WORKOUT_CLICK_ACTIONS = {
     'log-set': async (el) => {
       if (el.disabled) return;
@@ -7138,27 +7243,37 @@
       if (!group) return;
       const panel = group.querySelector('.ex-history');
       if (!panel) return;
+      const id = Number(group.dataset.exid);
       const opening = panel.style.display !== 'block';
       // Rendered on first open, not on every repaint. Most exercises in a
       // session never have this opened, and building it for all of them
       // would add another pass over the whole workout history to the path
       // that already runs on every single logged set.
       if (opening && panel.dataset.rendered !== 'yes') {
-        const id = Number(group.dataset.exid);
         const { allWorkouts, exercisesById } = activeWorkoutCtx;
         panel.innerHTML = exerciseHistoryHtml(id, allWorkouts, exercisesById[id]);
         panel.dataset.rendered = 'yes';
       }
       panel.style.display = opening ? 'block' : 'none';
       el.setAttribute('aria-expanded', opening ? 'true' : 'false');
+      // Tracked the same way expandedExercises tracks collapse state, so a
+      // panel opened for THIS exercise survives the next set logged against
+      // a DIFFERENT one — renderActiveWorkout() rebuilds the whole list on
+      // every logged set, and without this the panel silently closed itself
+      // mid-review.
+      if (opening) openHistoryPanels.add(id); else openHistoryPanels.delete(id);
     },
     'swap-open': async (el) => {
       const group = el.closest('.exercise-group');
       if (!group) return;
       const picker = group.querySelector('.swap-picker');
       if (!picker) return;
-      await ensureSwapOptions(picker.querySelector('.swap-select'), Number(group.dataset.exid));
-      picker.style.display = picker.style.display === 'block' ? 'none' : 'block';
+      const id = Number(group.dataset.exid);
+      await ensureSwapOptions(picker.querySelector('.swap-select'), id);
+      const opening = picker.style.display !== 'block';
+      picker.style.display = opening ? 'block' : 'none';
+      // See the matching comment on openHistoryPanels above — same reason.
+      if (opening) openSwapPickers.add(id); else openSwapPickers.delete(id);
     },
     'adjust-sets': async (el) => {
       const group = el.closest('.exercise-group');
@@ -7339,24 +7454,28 @@
       // completed rows -- and every log rebuilt the list under you.
       //
       // `expandedExercises` survives the re-render, so re-opening one to fix
-      // a mis-logged set doesn't snap shut on the next refresh.
+      // a mis-logged set doesn't snap shut on the next refresh. `openHistoryPanels`
+      // / `openSwapPickers` do the same for the History panel and Swap picker
+      // below \u2014 see their declaration up top.
       const setSummary = todaySets.map(st => formatSetLine(st)).join(' \u00b7 ');
+      const historyOpen = openHistoryPanels.has(effectiveExerciseId);
+      const swapOpen = openSwapPickers.has(effectiveExerciseId);
       rows.push(`
         <div class="exercise-group${isComplete ? ' complete' : ''}${isOpen ? '' : ' collapsed'}" data-exid="${effectiveExerciseId}" data-orig-exid="${ex.exerciseId}" data-target="${effectiveTarget}">
           <div class="ex-name">
             <span>${isComplete ? '<span class="ex-tick">\u2713</span> ' : ''}${esc(effectiveName)}${isSwapped ? ` <span class="override-note">swapped today</span>` : ''}</span>
             <span class="ex-actions">
-              <button type="button" class="hist-btn" data-action="show-history" aria-expanded="false" aria-label="Previous sessions of ${esc(effectiveName)}" title="Previous sessions">History</button>
+              <button type="button" class="hist-btn" data-action="show-history" aria-expanded="${historyOpen}" aria-label="Previous sessions of ${esc(effectiveName)}" title="Previous sessions">History</button>
               ${isComplete
                 ? `<button type="button" class="ex-toggle" data-action="toggle-exercise" aria-expanded="${isOpen}" aria-label="${isOpen ? 'Collapse' : 'Expand'} ${esc(effectiveName)}" title="${isOpen ? 'Collapse' : 'Expand to edit'}">${isOpen ? '\u2303' : '\u2304'}</button>`
                 : `<button type="button" class="swap-btn" data-action="swap-open">Swap</button>`}
             </span>
           </div>
           ${isComplete && !isOpen ? `<div class="meta-row ex-digest">${esc(setSummary)}</div>` : ''}
-          <div class="swap-picker">
+          <div class="swap-picker"${swapOpen ? ' style="display:block"' : ''}>
             <select class="swap-select" data-action="swap-select" aria-label="Swap ${esc(effectiveName)} for today"></select>
           </div>
-          <div class="ex-history"></div>
+          <div class="ex-history"${historyOpen ? ' style="display:block" data-rendered="yes"' : ''}>${historyOpen ? exerciseHistoryHtml(effectiveExerciseId, allWorkouts, exercisesById[effectiveExerciseId]) : ''}</div>
           <div class="meta-row">
             <button type="button" class="today-set-adj" data-action="adjust-sets" data-delta="-1" data-plan-target="${ex.targetSets}" title="Skip a set today \u2014 reverts automatically next time this day comes around">\u2212</button>
             <span>${effectiveTarget} sets \u00d7 ${ex.repRangeMin}-${ex.repRangeMax} reps</span>
@@ -7379,6 +7498,18 @@
     }
     container.innerHTML = rows.join('');
 
+    // Reopened pickers (see openSwapPickers above) render already visible
+    // via the inline style baked into the markup, but the <select> itself
+    // is still empty — ensureSwapOptions() is what a click normally does,
+    // called here instead so the picker isn't visible-but-blank after a set
+    // gets logged on another exercise.
+    for (const exid of openSwapPickers) {
+      const group = container.querySelector(`.exercise-group[data-exid="${exid}"]`);
+      if (!group) { openSwapPickers.delete(exid); continue; }
+      const picker = group.querySelector('.swap-picker');
+      if (picker) await ensureSwapOptions(picker.querySelector('.swap-select'), exid);
+    }
+
     // After a log the list shrinks -- completed exercises collapse and the
     // page gets shorter -- and the browser clamps the scroll position to the
     // new maximum, which is what dumped the user at the bottom of the page.
@@ -7395,6 +7526,22 @@
     delegate(container, 'change', WORKOUT_CHANGE_ACTIONS);
     delegate(container, 'input', WORKOUT_INPUT_ACTIONS);
   }
+
+  // Weight/rep fields select their whole value on focus, so tapping into one
+  // that already has a number in it (a suggested weight, a logged set being
+  // corrected) replaces it outright. Without this, a tap drops the cursor at
+  // the tap point and the phone's numeric keypad inserts into or appends onto
+  // what's already there — a stray leading/trailing digit is the normal
+  // result, not a clean overwrite. A capturing `focus` listener on `document`
+  // rather than `delegate()`: this runs on every render (the whole list is
+  // rebuilt), so it is registered once, here, at module load, instead of
+  // per-render.
+  document.addEventListener('focus', (e) => {
+    const t = e.target;
+    if (t && t.matches && t.matches('.plan-log-weight, .plan-log-reps, .set-edit-weight, .set-edit-reps')) {
+      t.select();
+    }
+  }, true);
 
   // Owns the Log tab's day-picker + active-workout list. Keeps the user's
   // in-session day choice sticky (selectedLogDayIdx) across re-renders
@@ -7420,8 +7567,30 @@
       const todayWorkout = workouts
         ? workouts.find(w => w.date === todayStr()) || null
         : await getWorkoutForDate(todayStr());
-      selectedLogDayIdx = (todayWorkout && todayWorkout.planId === plan.id && todayWorkout.dayIndex != null)
-        ? todayWorkout.dayIndex : 0;
+      if (todayWorkout && todayWorkout.planId === plan.id && todayWorkout.dayIndex != null) {
+        // Already logged something today against this plan — show whatever
+        // day that was, not wherever the rotation below would otherwise land.
+        selectedLogDayIdx = todayWorkout.dayIndex;
+      } else {
+        // Nothing logged yet today: advance to the day AFTER whichever one
+        // was last actually trained against THIS plan, so the split rotates
+        // on its own (Push, Pull, Legs, Push, ...) instead of resetting to
+        // day 0 every morning nothing's been logged yet. Scoped to plan.id
+        // rather than "the last workout of any kind" because regenerating a
+        // plan always creates a new id (see generatePlanWithAI) — an old
+        // plan's day count/order can't be assumed to line up with this
+        // one's, so a fresh plan correctly starts back at day 0 instead of
+        // inheriting a stale index from whatever came before it. A session
+        // only counts if it actually has a logged set — a started-but-empty
+        // one (warm-up timer tapped, nothing logged) shouldn't advance the
+        // rotation past a day that never really happened.
+        const allWorkouts = workouts || await getAllWorkouts();
+        const lastForPlan = allWorkouts
+          .filter(w => w.planId === plan.id && w.dayIndex != null && w.date !== todayStr()
+            && w.exercises.some(ex => ex.sets.length > 0))
+          .sort((a, b) => b.date.localeCompare(a.date) || (b.ts || 0) - (a.ts || 0))[0];
+        selectedLogDayIdx = lastForPlan ? (lastForPlan.dayIndex + 1) % plan.days.length : 0;
+      }
     }
     daySelect.innerHTML = plan.days.map((d, i) => `<option value="${i}">${esc(d.name)}</option>`).join('');
     daySelect.value = String(selectedLogDayIdx);
@@ -8234,26 +8403,56 @@ Respond with ONLY valid JSON, no markdown fences, no commentary, exactly matchin
 ${schemaExample}`;
 
     const systemMsg = 'You are a strength training coach. You respond only with valid JSON, never markdown or prose.';
-    // Captured verbatim, before the network call, so "View the full prompt"
-    // always reflects exactly what was (or was about to be) sent — including
-    // on a failed or errored generation, which is usually the case someone
-    // wants to check.
-    lastPlanPromptText = `SYSTEM:\n${systemMsg}\n\nUSER:\n${prompt}`;
-    renderViewPromptButton();
 
-    const content = await aiChat({
-      apiKey, model,
-      system: systemMsg,
-      user: prompt
-    });
+    // PINNED IS CHECKED HERE, WITH ONE RETRY — not force-injected like
+    // disliked exercises are force-REMOVED, because a pin can legitimately
+    // lose: the health-constraint note above outranks it by design, and a
+    // model that (correctly) drops a pinned exercise for safety reasons is
+    // doing its job, not failing it. So the response only gets handed back
+    // to the model once, with the specific gap named, and whatever comes
+    // back after that — pin honored or not — is accepted rather than
+    // fought with again. A second silent drop reads as "the health note
+    // wins," which is the one case this app has already decided is correct.
     let parsed;
-    try { parsed = JSON.parse(content); }
-    catch (e) {
-      logPlanStatus(`Raw response (unparsable): ${content.slice(0, 300)}`);
-      throw new Error('Could not parse the AI response as JSON \u2014 try again.');
+    let userMsg = prompt;
+    let attempt = 0;
+    while (true) {
+      attempt++;
+      // Captured verbatim, before each network call, so "View the full
+      // prompt" always reflects exactly what was (or was about to be) sent
+      // — including on a failed or errored generation, which is usually the
+      // case someone wants to check.
+      lastPlanPromptText = `SYSTEM:\n${systemMsg}\n\nUSER:\n${userMsg}`;
+      renderViewPromptButton();
+
+      const content = await aiChat({
+        apiKey, model,
+        system: systemMsg,
+        user: userMsg
+      });
+      try { parsed = JSON.parse(content); }
+      catch (e) {
+        logPlanStatus(`Raw response (unparsable): ${content.slice(0, 300)}`);
+        throw new Error('Could not parse the AI response as JSON \u2014 try again.');
+      }
+      if (!parsed.days || !Array.isArray(parsed.days)) throw new Error('AI response was missing the expected "days" list.');
+      logPlanStatus(`Got ${parsed.days.length} day(s) back. Matching exercises against your library\u2026`);
+
+      if (!pinnedExercises.length) break;
+      const namesInPlan = new Set();
+      for (const day of parsed.days) {
+        if (!Array.isArray(day.exercises)) continue;
+        for (const ex of day.exercises) namesInPlan.add(nameKey(ex && ex.name));
+      }
+      const missingPinned = pinnedExercises.filter(e => !namesInPlan.has(nameKey(e.name)));
+      if (!missingPinned.length) break;
+      if (attempt > 1) {
+        logPlanStatus(`Pinned exercise(s) still missing after one retry \u2014 keeping this plan as generated (likely overridden by the health constraint): ${missingPinned.map(e => e.name).join(', ')}.`);
+        break;
+      }
+      logPlanStatus(`Pinned exercise(s) missing from the plan: ${missingPinned.map(e => e.name).join(', ')} \u2014 asking the AI to try again (once).`);
+      userMsg = `${prompt}\n\nIMPORTANT: your previous response left out these pinned exercise(s): ${missingPinned.map(e => e.name).join(', ')}. Include each of them this time, on a day that trains its primary muscle group \u2014 UNLESS the health constraint above genuinely rules it out for safety, in which case leaving it out again is correct.`;
     }
-    if (!parsed.days || !Array.isArray(parsed.days)) throw new Error('AI response was missing the expected "days" list.');
-    logPlanStatus(`Got ${parsed.days.length} day(s) back. Matching exercises against your library\u2026`);
 
     const byName = new Map(allExercises.map(e => [nameKey(e.name), e]));
     // Exercise records created below for names the library didn't already
@@ -8664,7 +8863,7 @@ Respond with ONLY valid JSON, no markdown, exactly:
   function actionRegistries() {
     return {
       ENTRY_ROW_ACTIONS, ENTRY_ROW_INPUT_ACTIONS,
-      HISTORY_CLICK_ACTIONS, HISTORY_CHANGE_ACTIONS, HISTORY_INPUT_ACTIONS,
+      HISTORY_CLICK_ACTIONS, HISTORY_CHANGE_ACTIONS, HISTORY_INPUT_ACTIONS, PROGRESS_CHART_ACTIONS,
       EXERCISE_MANAGER_CLICK_ACTIONS, EXERCISE_MANAGER_CHANGE_ACTIONS,
       WORKOUT_CLICK_ACTIONS, WORKOUT_CHANGE_ACTIONS, WORKOUT_INPUT_ACTIONS,
       PLAN_DAY_CLICK_ACTIONS, PLAN_DAY_CHANGE_ACTIONS,

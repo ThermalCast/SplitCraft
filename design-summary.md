@@ -521,17 +521,33 @@ with a Log button: amber wash and rail), `.set-row.pending` (dimmed,
 italic). The `sets × reps` prescription and the progression suggestion live
 in a dedicated `.meta-row` (`.meta-row.suggestion` amber-tinted), not a
 generic `.set-row`. `suggestForExercise()` returns `why` as an array of
-terse tags (`new lift`, `4+ RIR left`, `cutting`, `age 55`) rendered as dim
+terse tags (`new lift`, `top set`, `4+ RIR left`, `cutting`) rendered as dim
 chips beside a sentence kept under ~110 characters — the reason a suggestion
-differs from expectation is still visible, just not as prose.
+differs from expectation is still visible, just not as prose. Age still
+scales the increment (see `ageRateMultiplier()`), it just isn't called out
+as its own tag — a lifter old enough to trigger it doesn't need reminding
+what age they are on every exercise.
 
 **Day-picker stickiness**: which day the workout tab is showing
 (`selectedLogDayIdx`, a plain in-memory variable) is preserved across
 re-renders triggered by logging/deleting sets. It resets to the plan's
-default (today's workout's stored `dayIndex`, or day 0) on page load and
-after generating a new plan — not on every `refreshPlanTab()` call, which
-also runs after settings saves, equipment changes, a unit switch, import and
-restore, none of which should knock the picker back to today.
+default on page load and after generating a new plan — not on every
+`refreshPlanTab()` call, which also runs after settings saves, equipment
+changes, a unit switch, import and restore, none of which should knock the
+picker back to today.
+
+**The default rotates the split automatically.** If today already has a
+workout logged against the CURRENT plan, that workout's own `dayIndex` wins
+— you're picking up where today left off, not wherever the rotation would
+otherwise land. Otherwise the default is one past whichever day was last
+actually trained against this plan (`lastForPlan.dayIndex + 1`, wrapping
+with `% plan.days.length`): did Push yesterday, Pull is what's waiting today
+instead of the picker resetting to day 0 every morning nothing's logged yet.
+"Last trained" is scoped to `plan.id` and requires at least one logged set
+— a day with zero sets (Start tapped, nothing logged) doesn't count, and a
+freshly regenerated plan (a new id every time, see `generatePlanWithAI`)
+correctly starts the rotation over at day 0 rather than inheriting a stale
+index from whatever plan came before it.
 
 **Manual entry.** A free-form entry form below the active-workout section —
 exercise picker, any set type — for logging things off-plan (warm-ups,
@@ -1036,9 +1052,11 @@ backed by the separate `exercisePrefs` store. Like and dislike are mutually
 exclusive with each other; disliking clears any pin (can't pin something
 excluded); pinning clears any dislike.
 
-Pinned and liked are **prompt-only** — no post-processing of the AI's
-response, keeping generation behavior legible from the prompt itself, at the
-cost of inclusion relying on the model following instructions.
+Liked is **prompt-only** — no post-processing of the AI's response, keeping
+generation behavior legible from the prompt itself, at the cost of inclusion
+relying on the model following instructions. Disliked and pinned each get a
+check after the response comes back, but of two different shapes, because a
+miss means two different things for them:
 - **Disliked → hard exclusion, enforced on parse, not merely requested**:
   filtered out of the prompt's exercise list so the model isn't offered them,
   AND stripped from the parsed response afterward if the model names one
@@ -1049,8 +1067,19 @@ cost of inclusion relying on the model following instructions.
   the specific exercise(s) that would aggravate it is the one lever in this
   app that's an actual guarantee rather than an appeal to the model's
   judgment. Applies to manual Plan-tab Swap too, not just generation.
-- **Pinned → always required**: every pinned exercise is listed with an
-  explicit "you MUST include every single one of these," every generation.
+- **Pinned → required, checked for and retried ONCE, not force-injected**:
+  every pinned exercise is listed with an explicit "you MUST include every
+  single one of these," every generation. Unlike disliked, a missing pinned
+  exercise can't just be added back into the parsed response the way a
+  disliked one is deleted from it — there's no single correct day/slot to
+  drop it into, and more importantly a health-constraint note legitimately
+  outranks a pin by design (see below), so a model that (correctly) drops a
+  pinned exercise for safety is doing its job, not failing it. So a missing
+  pinned exercise gets the whole request handed back to the model exactly
+  ONCE, with the specific gap named in the follow-up prompt and an explicit
+  carve-out for the health constraint; whatever comes back after that —
+  pinned exercise present or not — is accepted rather than fought with
+  again, on the assumption that a second miss means the constraint is why.
 - **Liked → required about half the time, per exercise**: each liked
   exercise independently gets a `Math.random() < 0.5` roll each generation;
   a hit gets the same "REQUIRED" wording as pinned for that request, a miss
@@ -1276,6 +1305,22 @@ in-range set (`historyRanged`):
   with sets in range, ordered by set count, selection sticky across
   re-renders. Changing the exercise re-renders only this chart, not the
   whole `refreshLogAndHistory()` path.
+  - **A month tick whose true calendar position falls before the first data
+    point is DROPPED, not clamped onto the left edge.** Clamping used to
+    draw it at a false position — wherever the data actually starts, not the
+    1st of that month — which visibly compressed the gap to the next
+    (honestly-placed) tick and read as uneven spacing on an axis that's
+    otherwise perfectly regular. A partial leading month now goes unlabeled
+    instead of mislabeled.
+  - **Each dot is tappable, not just hoverable.** A dot's own `<title>` only
+    ever fires on mouse hover, which a touch screen has no equivalent of.
+    Every `dots:true` point also gets an invisible `chart-dot-hit` circle
+    (r=9, `data-action="chart-dot-tap"`) drawn BEHIND the r=2.6 visible dot —
+    the dot itself is `pointer-events: none` so it can't swallow the exact
+    center-tap that would otherwise land on it instead of passing through to
+    the larger target beneath. Tapping writes the point's date/value into a
+    `.chart-readout` under the chart (`PROGRESS_CHART_ACTIONS`,
+    `chart-dot-tap`) and highlights the tapped dot (`.chart-dot.active`).
 
 **`timeBuckets(dates)`** is the bucket-boundary logic shared by the two
 bar charts (training volume and sets-per-muscle-over-time): weekly buckets up
@@ -1486,7 +1531,13 @@ silently clear it alongside cache data.
   writes: `validateBackup()` walks every workout, exercise entry, set and
   weight/reps pair before the destructive button is even offered, naming
   the first offender ("workout 3 (2026-01-14) has a set with no
-  weight/reps entries. Nothing has been changed.").
+  weight/reps entries. Nothing has been changed."). This includes
+  referential integrity, not just shape: every workout-exercise and
+  plan-day-exercise `exerciseId` is checked against the id set built from
+  the backup's own `exercises` list, so a dangling reference — numerically
+  valid but pointing at no record in this same file — is caught here too,
+  rather than surviving validation (ids are restored verbatim) and only
+  breaking a render afterward.
 - **`restorePut()`** preserves original ids across both storage backends
   (IndexedDB preserves them on its own; the in-memory fallback would
   otherwise assign fresh ones and shred every cross-reference), advancing

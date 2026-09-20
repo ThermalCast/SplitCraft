@@ -1212,6 +1212,14 @@ check('clearSetting removes it from the cache',
   const cat = await app.getAllRecords('exercises');
   const find = (n) => cat.find(e => e.name === n);
 
+  // This section's numbers (54.43, 60...) are written as if weightUnit is
+  // 'kg' — pin it explicitly via the same UI-handler path a real unit
+  // switch uses, rather than relying on whatever the app's own default
+  // happens to be (it's 'lb' as of the default-unit change; see settings).
+  const unitEl = app.document.getElementById('setting-weight-unit');
+  unitEl.value = 'kg';
+  await listeners.get('setting-weight-unit').change({ target: unitEl });
+
   // --- Editing REPS must not rewrite the WEIGHT. ---
   // The inputs render weight at one decimal; imported weights carry two
   // (54.43kg is real Fitbod data). Saving the row read the box back, so a
@@ -1886,6 +1894,88 @@ check('clearSetting removes it from the cache',
     !!sentPrompt && /left knee injury/.test(sentPrompt) && !/stale note/.test(sentPrompt),
     sentPrompt ? sentPrompt.slice(0, 0) + (/left knee/.test(sentPrompt) ? 'has new' : 'missing new')
       + (/stale note/.test(sentPrompt) ? ' + still has stale' : '') : 'no call made');
+}
+
+// ---------------------------------------------------------------------------
+// The Log tab's day picker rotates the split on its own: with nothing
+// logged today, the default day should be one past whichever day was last
+// actually trained against the CURRENT plan, not a reset to day 0. Each
+// scenario clears the plans store and calls refreshActiveWorkoutSection()
+// with no plan first — that's the one existing path that resets the
+// in-memory selectedLogDayIdx to null (it's a top-level `let`, not a
+// `function`, so tests have no direct way to reach it — see harness.mjs)
+// — so every scenario below starts from a genuinely fresh pick, not
+// whatever an earlier scenario or an earlier suite left it sitting on.
+// ---------------------------------------------------------------------------
+{
+  const cat = await app.getAllRecords('exercises');
+  const bench = cat.find(e => e.name === 'Barbell Bench Press');
+  const rowEx = cat.find(e => e.name === 'Barbell Row');
+  const threeDayDays = [
+    { name: 'Day A', exercises: [{ exerciseId: bench.id, name: bench.name, targetSets: 3, repRangeMin: 8, repRangeMax: 12 }] },
+    { name: 'Day B', exercises: [{ exerciseId: rowEx.id, name: rowEx.name, targetSets: 3, repRangeMin: 8, repRangeMax: 12 }] },
+    { name: 'Day C', exercises: [{ exerciseId: bench.id, name: bench.name, targetSets: 3, repRangeMin: 8, repRangeMax: 12 }] },
+  ];
+  function daysAgoStr(n) {
+    const d = new Date(); d.setDate(d.getDate() - n);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+  const realSet = { ts: Date.now(), type: 'standard', entries: [{ weight: 60, reps: 8 }] };
+  async function freshRotationPlan() {
+    await app.clearStore('plans');
+    // Also wipes workouts, not just plans: the harness's in-memory fallback
+    // (no IndexedDB in tests — see tests/README.md) resets a store's
+    // auto-increment counter to 1 on clearStore(), so every scenario's plan
+    // gets the SAME id back. Without this, an earlier scenario's leftover
+    // workouts would still match `planId === plan.id` in the next one and
+    // get counted as this plan's history.
+    await app.clearStore('workouts');
+    await app.refreshActiveWorkoutSection(); // no plan -> resets selectedLogDayIdx to null
+    return app.addRecord('plans', {
+      createdAt: Date.now(), goal: 'Rotation test', daysPerWeek: 3, equipment: '', notes: '',
+      repRangeMin: 8, repRangeMax: 12, fixedSets: null, days: threeDayDays
+    });
+  }
+  async function pickedDay() {
+    await app.refreshActiveWorkoutSection();
+    return app.document.getElementById('log-day-picker').value;
+  }
+
+  {
+    const planId = await freshRotationPlan();
+    await app.addRecord('workouts', { date: daysAgoStr(2), ts: Date.now() - 2 * 86400000, planId, dayIndex: 0, dayName: 'Day A',
+      exercises: [{ exerciseId: bench.id, sets: [realSet] }] });
+    const picked = await pickedDay();
+    check('last trained Day A, nothing today -> defaults to Day B', picked === '1', picked);
+  }
+  {
+    const planId = await freshRotationPlan();
+    await app.addRecord('workouts', { date: daysAgoStr(2), ts: Date.now() - 2 * 86400000, planId, dayIndex: 2, dayName: 'Day C',
+      exercises: [{ exerciseId: bench.id, sets: [realSet] }] });
+    const picked = await pickedDay();
+    check('last trained Day C (the last day) -> wraps around to Day A', picked === '0', picked);
+  }
+  {
+    const planId = await freshRotationPlan();
+    await app.addRecord('workouts', { date: daysAgoStr(4), ts: Date.now() - 4 * 86400000, planId, dayIndex: 0, dayName: 'Day A',
+      exercises: [{ exerciseId: bench.id, sets: [realSet] }] });
+    // Session started but nothing was logged -- shouldn't count as "trained".
+    await app.addRecord('workouts', { date: daysAgoStr(1), ts: Date.now() - 1 * 86400000, planId, dayIndex: 1, dayName: 'Day B',
+      exercises: [{ exerciseId: rowEx.id, sets: [] }] });
+    const picked = await pickedDay();
+    check('a started-but-empty session is skipped -- still rotates off the last REAL one (Day A -> Day B)',
+      picked === '1', picked);
+  }
+  {
+    const planId = await freshRotationPlan();
+    await app.addRecord('workouts', { date: daysAgoStr(2), ts: Date.now() - 2 * 86400000, planId, dayIndex: 0, dayName: 'Day A',
+      exercises: [{ exerciseId: bench.id, sets: [realSet] }] });
+    // Already picked up Day C today -- that wins over the Day A -> Day B rotation.
+    await app.addRecord('workouts', { date: app.todayStr(), ts: Date.now(), planId, dayIndex: 2, dayName: 'Day C',
+      exercises: [{ exerciseId: bench.id, sets: [realSet] }] });
+    const picked = await pickedDay();
+    check('today already has a logged day for this plan -> that day wins over rotation', picked === '2', picked);
+  }
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

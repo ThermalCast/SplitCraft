@@ -33,33 +33,35 @@
   // 'suspended' on mobile; resume() on each use covers the case where it was
   // suspended later by the OS backgrounding the tab.
   let audioCtx = null;
+  // Shared by unlockAudio() and beep() below: both need a live, resumed
+  // context and neither cares which of them actually constructs it.
+  function ensureAudioCtx() {
+    try {
+      const Ctor = window.AudioContext || window.webkitAudioContext;
+      if (!Ctor) return null;
+      if (!audioCtx) audioCtx = new Ctor();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      return audioCtx;
+    } catch (e) { return null; /* audio not available — non-fatal */ }
+  }
   // iOS only unlocks Web Audio when the context is created (or resumed)
   // synchronously inside a user-gesture handler; building it lazily on the
   // first beep — which fires from a setInterval tick, not a gesture — is
   // silently ignored there. startRestTimer() always runs inside a Log tap,
   // so it calls this to create/resume the context while still inside that
   // gesture; beep() then just reuses whatever context this left behind.
-  function unlockAudio() {
-    try {
-      const Ctor = window.AudioContext || window.webkitAudioContext;
-      if (!Ctor) return;
-      if (!audioCtx) audioCtx = new Ctor();
-      if (audioCtx.state === 'suspended') audioCtx.resume();
-    } catch (e) { /* audio not available — non-fatal */ }
-  }
+  function unlockAudio() { ensureAudioCtx(); }
   function beep() {
+    const ctx = ensureAudioCtx();
+    if (!ctx) return;
     try {
-      const Ctor = window.AudioContext || window.webkitAudioContext;
-      if (!Ctor) return;
-      if (!audioCtx) audioCtx = new Ctor();
-      if (audioCtx.state === 'suspended') audioCtx.resume();
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.connect(gain); gain.connect(audioCtx.destination);
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
       osc.frequency.value = 880;
-      gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+      gain.gain.setValueAtTime(0.2, ctx.currentTime);
       osc.start();
-      osc.stop(audioCtx.currentTime + 0.3);
+      osc.stop(ctx.currentTime + 0.3);
     } catch (e) { /* audio not available — non-fatal */ }
   }
 
@@ -241,6 +243,11 @@
   // still save immediately on Log, independent of session state)
   // =========================================================================
   let sessionTickInterval = null;
+  // Set only while a running session's interval is torn down for being
+  // hidden, so the visibilitychange listener below knows to restart it on
+  // return without also firing (and reading the store) on every tab switch
+  // while no session is running at all.
+  let sessionWasRunning = false;
 
   async function refreshSessionCard() {
     clearInterval(sessionTickInterval);
@@ -283,4 +290,23 @@
   document.getElementById('session-complete-btn').addEventListener('click', async () => {
     await completeWorkoutSession();
     await refreshLogAndHistory();
+  });
+
+  // A running session's tick has nowhere useful to run while the tab is
+  // hidden — the element it updates isn't seen, and a backgrounded tab
+  // throttles setInterval anyway (same reasoning as the rest timer above,
+  // just without a deadline to resync from: elapsed-since-start is exact on
+  // any tick, throttled or not). Torn down on hide and rebuilt on return
+  // instead of left running unseen for the rest of the session.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (sessionTickInterval) {
+        clearInterval(sessionTickInterval);
+        sessionTickInterval = null;
+        sessionWasRunning = true;
+      }
+    } else if (sessionWasRunning) {
+      sessionWasRunning = false;
+      refreshSessionCard();
+    }
   });

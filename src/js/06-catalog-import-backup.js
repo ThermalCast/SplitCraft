@@ -1292,6 +1292,20 @@
     // a render path gets checked here, before the button that wipes is even
     // offered.
     const fail = (msg) => { throw new Error(`Backup file is damaged — ${msg}. Nothing has been changed.`); };
+    d.exercises.forEach((ex, i) => {
+      if (!ex || typeof ex !== 'object') fail(`exercise ${i + 1} is not a record`);
+      if (!Number.isFinite(Number(ex.id))) fail(`exercise ${i + 1} has no id`);
+      if (typeof ex.name !== 'string' || !ex.name.trim()) fail(`exercise ${i + 1} has no name`);
+    });
+    // Built AFTER the loop above so it only ever contains ids that passed
+    // their own record check, then reused below to catch a DANGLING
+    // reference — a workout or plan exerciseId that looks fine on its own
+    // (numeric) but names no record in this same backup. Restore writes ids
+    // back verbatim (see applyRestore), so a dangling id here becomes a
+    // dangling id after restore too, surfacing exactly the way the comment
+    // above describes: your own data already gone, and a render that throws
+    // reaching into `exercisesById[missingId]`.
+    const exerciseIds = new Set(d.exercises.map(ex => Number(ex && ex.id)).filter(Number.isFinite));
     d.workouts.forEach((w, i) => {
       const where = `workout ${i + 1}${w && w.date ? ` (${w.date})` : ''}`;
       if (!w || typeof w !== 'object') fail(`${where} is not a record`);
@@ -1299,7 +1313,9 @@
       if (!Array.isArray(w.exercises)) fail(`${where} has no exercise list`);
       w.exercises.forEach((ex) => {
         if (!ex || typeof ex !== 'object') fail(`${where} contains an invalid exercise entry`);
-        if (!Number.isFinite(Number(ex.exerciseId))) fail(`${where} has an exercise with no id`);
+        const exerciseId = Number(ex.exerciseId);
+        if (!Number.isFinite(exerciseId)) fail(`${where} has an exercise with no id`);
+        if (!exerciseIds.has(exerciseId)) fail(`${where} references exercise id ${exerciseId}, which isn't in this backup's exercise list`);
         if (!Array.isArray(ex.sets)) fail(`${where} has an exercise with no set list`);
         ex.sets.forEach((s) => {
           if (!s || !Array.isArray(s.entries) || s.entries.length === 0) {
@@ -1313,15 +1329,15 @@
         });
       });
     });
-    d.exercises.forEach((ex, i) => {
-      if (!ex || typeof ex !== 'object') fail(`exercise ${i + 1} is not a record`);
-      if (!Number.isFinite(Number(ex.id))) fail(`exercise ${i + 1} has no id`);
-      if (typeof ex.name !== 'string' || !ex.name.trim()) fail(`exercise ${i + 1} has no name`);
-    });
     d.plans.forEach((p, i) => {
       if (!p || !Array.isArray(p.days)) fail(`plan ${i + 1} has no days list`);
       p.days.forEach((day) => {
         if (!day || !Array.isArray(day.exercises)) fail(`plan ${i + 1} has a day with no exercise list`);
+        day.exercises.forEach((ex) => {
+          const exerciseId = Number(ex && ex.exerciseId);
+          if (!Number.isFinite(exerciseId)) fail(`plan ${i + 1} has a day with an exercise that has no id`);
+          if (!exerciseIds.has(exerciseId)) fail(`plan ${i + 1} references exercise id ${exerciseId}, which isn't in this backup's exercise list`);
+        });
       });
     });
     return parsed;

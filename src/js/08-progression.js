@@ -647,7 +647,6 @@
     if (lastRamped) why.push('top set');
     if (lastRir != null && lastRir >= 2) why.push(`${lastRir === 4 ? '4+' : lastRir} RIR left`);
     if (modifiers.energy === 'deficit') why.push('cutting');
-    if (modifiers.age >= 40) why.push(`age ${modifiers.age}`);
 
     if (metTop) {
       const nextWeightKg = lastWeightKg + increment;

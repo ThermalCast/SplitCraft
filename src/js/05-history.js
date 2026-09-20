@@ -283,14 +283,30 @@
       out += `<path class="chart-line ${s.cls || ''}" d="${d}"/>`;
       if (s.dots) {
         s.points.forEach(p => {
-          out += `<circle class="chart-dot" cx="${X(p.t).toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="2.6"><title>${esc(p.label)}</title></circle>`;
+          // The hit target is bigger (r=9) than the visible dot (r=2.6) and
+          // drawn FIRST — a fingertip can't reliably land on a 2.6px point.
+          // It carries both the tap handler (data-action/data-label, for a
+          // touch screen, which never fires a native SVG <title> tooltip)
+          // and the <title> itself (for a mouse hover). The visible dot on
+          // top is `pointer-events: none` (CSS) so it's purely decorative —
+          // without that, its own smaller circle would sit above the hit
+          // target in paint order and swallow exactly the clicks landing
+          // dead-center, which is exactly where a precise tap lands.
+          out += `<circle class="chart-dot-hit" data-action="chart-dot-tap" data-label="${esc(p.label)}" cx="${X(p.t).toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="9"><title>${esc(p.label)}</title></circle>`;
+          out += `<circle class="chart-dot" cx="${X(p.t).toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="2.6"/>`;
         });
       }
     });
-    if (ticks && ticks.length > 1) {
-      // A month start before tMin clamps to the axis so the leading partial
-      // month still gets named.
-      out += tickMarksSVG(ticks, tk => Math.max(padL, X(tk.t)), padT + plotH, H, W - padR);
+    // A month start before tMin used to be CLAMPED onto the left edge so the
+    // leading partial month still got named — but that draws its tick at a
+    // position that isn't actually the 1st of that month, which visibly
+    // compresses the gap to the next (honestly-placed) tick and reads as
+    // uneven spacing on an axis that's otherwise perfectly regular. Dropped
+    // instead: a partial first month goes unlabeled rather than mislabeled,
+    // and every tick that IS drawn sits at its true calendar position.
+    const onscreenTicks = (ticks || []).filter(tk => X(tk.t) >= padL - 0.5);
+    if (onscreenTicks.length > 1) {
+      out += tickMarksSVG(onscreenTicks, tk => X(tk.t), padT + plotH, H, W - padR);
     } else {
       // Range sits inside a single month — day labels say more than one
       // repeated month name would.
@@ -518,6 +534,30 @@
       <div class="hint" style="margin-top:8px;">Sets, not volume &mdash; volume is dominated by heavy compounds and zero for bodyweight work. Each set counts once, against its exercise's <em>primary</em> muscle only.</div>`;
   }
 
+  // A dot's own <title> only ever shows on a mouse hover, which a touch
+  // screen has no equivalent of — the one place in this chart genuinely
+  // unusable on a phone without this. Tapping (the invisible, larger
+  // chart-dot-hit circle drawn under each dot — see lineChartSVG) writes the
+  // point's date/value into a readout under the chart instead, and marks the
+  // tapped dot so it's clear which point the readout is describing.
+  const PROGRESS_CHART_ACTIONS = {
+    'chart-dot-tap': (hit) => {
+      const container = document.getElementById('chart-progress');
+      if (!container) return;
+      const readout = container.querySelector('.chart-readout');
+      if (readout) {
+        readout.textContent = hit.dataset.label || '';
+        readout.hidden = false;
+      }
+      container.querySelectorAll('.chart-dot.active').forEach(d => d.classList.remove('active'));
+      // The hit target and the visible dot are separate same-position
+      // circles (see lineChartSVG) so the readout highlights the sibling
+      // that's actually drawn, not the invisible one that was tapped.
+      const dot = hit.nextElementSibling;
+      if (dot && dot.classList) dot.classList.add('active');
+    }
+  };
+
   // Top set weight + estimated 1RM (Epley: w x (1 + reps/30)) per session.
   // Est. 1RM is the more honest progress signal — it moves when you add reps
   // at the same weight, which top-set weight alone can't show.
@@ -607,11 +647,13 @@
       : `${flat} across ${dates.length} sessions.`;
 
     el.innerHTML = svg + `
+      <div class="chart-readout" hidden></div>
       <div class="chart-legend">
         <span><i></i>${allPositive ? 'Top set' : 'Assisted load'} (${esc(weightUnit)})</span>
         ${allPositive ? '<span><i class="est"></i>Est. 1RM</span>' : '<span><i class="zero"></i>0 = unassisted</span>'}
       </div>
       <div class="hint" style="margin-top:6px;">${esc(trend)}</div>` + loadNote;
+    delegate(el, 'click', PROGRESS_CHART_ACTIONS);
   }
 
   document.getElementById('history-range').addEventListener('change', (e) => {
