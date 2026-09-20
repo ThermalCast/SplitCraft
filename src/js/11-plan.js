@@ -164,7 +164,7 @@
       // A fresh plan for this week makes any dismissal moot; clearing it stops
       // a stale value lingering into next week's comparison.
       await clearSetting('planWeekDismissed');
-      await populateExerciseSelect();
+      invalidateExercisePicker();
       await renderExerciseManager();
       selectedLogDayIdx = null; // a new plan just replaced the old one \u2014 reset the Log tab's day pick
       await refreshPlanTab();
@@ -180,52 +180,43 @@
     }
   });
 
-  // Delegated actions for #plan-day-overview. Named 'plan-swap-*' rather
-  // than reusing the Workout tab's 'swap-*' names: same shape (a picker
-  // toggled open, then a select that commits it), but this one edits the
-  // PLAN record permanently \u2014 see updatePlanDayExercise() \u2014 while the
-  // Workout tab's swap-select is scoped to today only. Different registries
-  // on different containers wouldn't collide either way, but distinct names
-  // make that permanence obvious at the call site.
+  // Delegated actions for #plan-day-overview. 'plan-swap-open' opens the
+  // shared exercise picker (see openExercisePicker(), 09-workout.js) and
+  // commits straight to the PLAN record via updatePlanDayExercise() below —
+  // permanent, unlike the Workout tab's session-only swap.
   const PLAN_DAY_CLICK_ACTIONS = {
     'plan-swap-open': async (el) => {
       const group = el.closest('.exercise-group');
       if (!group) return;
-      const picker = group.querySelector('.swap-picker');
-      if (!picker) return;
-      await ensureSwapOptions(picker.querySelector('.swap-select'), Number(group.dataset.exid));
-      picker.style.display = picker.style.display === 'block' ? 'none' : 'block';
-    },
-  };
-  const PLAN_DAY_CHANGE_ACTIONS = {
-    'plan-swap-select': async (el) => {
-      const group = el.closest('.exercise-group');
-      if (!group) return;
       const oldExerciseId = Number(group.dataset.exid);
-      const newExerciseId = Number(el.value);
-      if (newExerciseId === oldExerciseId) return;
-      const planId = Number(el.dataset.planid);
-      const dayIdx = Number(el.dataset.dayidx);
-      // Everything here is re-read from the store rather than trusted from
-      // the DOM, so any of it can be gone by the time the change fires --
-      // the plan regenerated in another tab, the day removed, the exercise
-      // deleted. Unguarded, that threw inside a forEach and took the rest
-      // of the render with it.
-      const currentPlan = await getRecord('plans', planId);
-      const day = currentPlan && currentPlan.days && currentPlan.days[dayIdx];
-      if (!day) return;
-      const exIndex = day.exercises.findIndex(e => e.exerciseId === oldExerciseId);
-      if (exIndex === -1) return;
-      const newEx = await getRecord('exercises', newExerciseId);
-      if (!newEx) return;
-      await updatePlanDayExercise(planId, dayIdx, exIndex, { exerciseId: newExerciseId, name: newEx.name });
-      await refreshPlanTab();
+      const planId = Number(group.dataset.planid);
+      const dayIdx = Number(group.dataset.dayidx);
+      await openExercisePicker({
+        title: 'Replace this exercise',
+        excludeIds: new Set([oldExerciseId]),
+        onSelect: async (newExerciseId) => {
+          // Everything here is re-read from the store rather than trusted
+          // from the DOM, so any of it can be gone by the time the picker
+          // resolves -- the plan regenerated in another tab, the day
+          // removed, the exercise deleted. Unguarded, that threw inside a
+          // forEach and took the rest of the render with it.
+          const currentPlan = await getRecord('plans', planId);
+          const day = currentPlan && currentPlan.days && currentPlan.days[dayIdx];
+          if (!day) return;
+          const exIndex = day.exercises.findIndex(e => e.exerciseId === oldExerciseId);
+          if (exIndex === -1) return;
+          const newEx = await getRecord('exercises', newExerciseId);
+          if (!newEx) return;
+          await updatePlanDayExercise(planId, dayIdx, exIndex, { exerciseId: newExerciseId, name: newEx.name });
+          await refreshPlanTab();
+        }
+      });
     },
   };
 
   // Read-only-ish structural view of the plan: each day's exercises with
   // their prescribed sets/reps, plus a PERMANENT swap (writes to the plan
-  // record itself). No logging happens here \u2014 see the Log tab's active
+  // record itself). No logging happens here — see the Log tab's active
   // workout for that; this tab is for shaping the plan, not doing it.
   async function renderPlanDayOverview(plan) {
     const container = document.getElementById('plan-day-overview');
@@ -237,9 +228,9 @@
     const pace = await sessionPace();
     const targetMinutes = Number(await getSetting('sessionMinutes', 0)) || 0;
     // The exercise catalog may have changed since the last paint (an import, a
-    // muscle reassignment, a new dislike), so the shared option list is
-    // rebuilt at most once for this render rather than reused across renders.
-    invalidateSwapOptions();
+    // muscle reassignment, a new dislike), so the shared exercise-picker list
+    // is rebuilt at most once for this render rather than reused across renders.
+    invalidateExercisePicker();
     const blocks = [];
     for (let dayIdx = 0; dayIdx < plan.days.length; dayIdx++) {
       const day = plan.days[dayIdx];
@@ -249,15 +240,12 @@
       const exRows = [];
       day.exercises.forEach((ex, exIdx) => {
         exRows.push(`
-          <div class="exercise-group" data-exid="${ex.exerciseId}">
+          <div class="exercise-group" data-exid="${ex.exerciseId}" data-planid="${plan.id}" data-dayidx="${dayIdx}">
             <div class="ex-name">
               <span>${esc(ex.name)}</span>
               <button type="button" class="swap-btn" data-action="plan-swap-open">Swap</button>
             </div>
-            <div class="swap-picker">
-              <select class="swap-select" data-action="plan-swap-select" data-planid="${plan.id}" data-dayidx="${dayIdx}" aria-label="Replace ${esc(ex.name)}"></select>
-            </div>
-            <div class="meta-row">${ex.targetSets} sets \u00d7 ${ex.repRangeMin}-${ex.repRangeMax} reps \u00b7 ~${Math.round(estimate.perExercise[exIdx].minutes)} min <span class="setup-note" title="Includes about ${Math.round(pace.minutesPerSetup)} min to reach the station, set it up and warm up">incl. setup</span></div>
+            <div class="meta-row">${ex.targetSets} sets × ${ex.repRangeMin}-${ex.repRangeMax} reps · ~${Math.round(estimate.perExercise[exIdx].minutes)} min <span class="setup-note" title="Includes about ${Math.round(pace.minutesPerSetup)} min to reach the station, set it up and warm up">incl. setup</span></div>
           </div>
         `);
       });
@@ -270,8 +258,8 @@
       blocks.push(`
         <div class="day-block">
           <div class="day-date">${esc(day.name)}</div>
-          <div class="meta-row day-load${over ? ' over' : ''}">${daySets} working sets \u00b7 about ${dayMinutes} min${over ? ` \u2014 over your ${targetMinutes} min target` : ''}</div>
-          <div class="meta-row day-breakdown">${Math.round(pace.fixedMinutes)} min getting started \u00b7 ${day.exercises.length} \u00d7 ~${Math.round(pace.minutesPerSetup)} min setup \u00b7 ${daySets} \u00d7 ~${Math.round(pace.minutesPerSet * 60)}s per set</div>
+          <div class="meta-row day-load${over ? ' over' : ''}">${daySets} working sets · about ${dayMinutes} min${over ? ` — over your ${targetMinutes} min target` : ''}</div>
+          <div class="meta-row day-breakdown">${Math.round(pace.fixedMinutes)} min getting started · ${day.exercises.length} × ~${Math.round(pace.minutesPerSetup)} min setup · ${daySets} × ~${Math.round(pace.minutesPerSet * 60)}s per set</div>
           ${exRows.join('')}
         </div>
       `);
@@ -279,7 +267,6 @@
     container.innerHTML = blocks.join('');
 
     delegate(container, 'click', PLAN_DAY_CLICK_ACTIONS);
-    delegate(container, 'change', PLAN_DAY_CHANGE_ACTIONS);
   }
 
   // Edits the plan itself (permanent, unlike the session-only swap/overrides
@@ -885,7 +872,7 @@ Respond with ONLY valid JSON, no markdown, exactly:
     btn.disabled = true; btn.textContent = 'Generating\u2026';
     try {
       await generatePlanWithAI({ goal, daysPerWeek, equipment, notes, repRangeMin, repRangeMax, splitType, fixedSets });
-      await populateExerciseSelect();
+      invalidateExercisePicker();
       await renderExerciseManager();
       selectedLogDayIdx = null; // a new plan just replaced the old one — reset the Log tab's day pick
       await refreshPlanTab();

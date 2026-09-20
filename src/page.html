@@ -402,7 +402,6 @@
      and the bonus-set row underneath stays wired either way. */
   .exercise-group.collapsed .meta-row:not(.ex-digest),
   .exercise-group.collapsed .meta-row.warmup,
-  .exercise-group.collapsed .swap-picker,
   .exercise-group.collapsed .set-row,
   .exercise-group.collapsed .plan-log-row { display: none !important; }
 
@@ -748,13 +747,84 @@
   .ex-history-vol { color: var(--text-faint); flex: 0 0 auto; }
   .ex-history-empty { color: var(--text-faint); font-size: 12px; padding: 8px 0; }
 
-  .swap-picker { padding: 10px 14px; border-bottom: 1px solid var(--border); display: none; background: var(--bg-soft); }
-  .swap-picker select {
-    width: 100%; min-height: 42px;
-    background: var(--surface-2); border: 1px solid var(--border);
-    border-radius: var(--r-sm); color: var(--text); font-size: 15px;
-    padding: 9px 34px 9px 11px; font-family: inherit;
+  /* Remove an accidentally-added extra exercise — only shown while nothing's
+     logged against it yet (see removeExtraExerciseLocked). Reuses swap-btn's
+     pill shape but a danger tint, since unlike Swap this is destructive. */
+  button.remove-ex-btn {
+    background: var(--danger-soft); border: 1px solid var(--danger-line); color: var(--danger);
+    border-radius: var(--r-pill); font-family: inherit; font-size: 12px; font-weight: 600;
+    letter-spacing: 0.05em; text-transform: uppercase;
+    padding: 8px 15px; cursor: pointer; flex: 0 0 auto; min-height: 34px;
   }
+  button.remove-ex-btn:active { filter: brightness(1.15); }
+  button.add-exercise-btn {
+    background: none; border: 1px dashed var(--border-strong); color: var(--text-dim);
+    border-radius: var(--r-sm); padding: 13px; font-family: inherit; font-size: 13.5px;
+    font-weight: 700; letter-spacing: 0.02em; cursor: pointer; width: 100%;
+    min-height: var(--tap); transition: color 0.14s ease, border-color 0.14s ease;
+  }
+  button.add-exercise-btn:active { color: var(--accent); border-color: var(--accent-line); }
+  button.link-btn {
+    background: none; border: none; color: var(--accent); font-family: inherit;
+    font-size: 12.5px; font-weight: 600; cursor: pointer; padding: 6px 2px;
+    min-height: var(--tap); text-align: left;
+  }
+  button.link-btn:active { opacity: 0.7; }
+
+  /* ===== Exercise picker (Swap, Plan-tab Swap, Add Exercise) =====
+     Full-screen rather than the .prompt-modal centred card: this is a
+     browsable/searchable list, not a fixed block of text, and wants the
+     whole viewport height to show useful rows instead of scrolling inside a
+     small box. */
+  .exercise-picker-modal {
+    position: fixed; inset: 0; z-index: 70;
+    background: var(--bg);
+    display: flex; flex-direction: column;
+  }
+  .exercise-picker-modal[hidden] { display: none !important; }
+  .exercise-picker-card { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+  .exercise-picker-header {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: calc(13px + env(safe-area-inset-top, 0px)) 15px 10px; flex: 0 0 auto;
+  }
+  .exercise-picker-header h3 { margin: 0; font-size: 15px; font-weight: 700; color: var(--text); }
+  .exercise-picker-search {
+    margin: 0 15px 10px; min-height: 44px;
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm);
+    color: var(--text); font-size: 16px; padding: 10px 13px; font-family: inherit;
+    flex: 0 0 auto;
+  }
+  .exercise-picker-search:focus {
+    outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .exercise-picker-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 15px; }
+  .picker-muscle-group { border-bottom: 1px solid var(--border); }
+  .picker-muscle-header {
+    width: 100%; display: flex; align-items: center; justify-content: space-between;
+    background: none; border: none; color: var(--text); font-family: inherit;
+    font-size: 14.5px; font-weight: 700; padding: 13px 2px; cursor: pointer; min-height: var(--tap);
+  }
+  .picker-muscle-count {
+    color: var(--text-faint); font-size: 12px; font-weight: 600; font-family: var(--mono);
+  }
+  .picker-muscle-header[aria-expanded="true"] .picker-muscle-count { color: var(--accent); }
+  .picker-muscle-list { display: flex; flex-direction: column; padding-bottom: 6px; }
+  .picker-muscle-list[hidden] { display: none; }
+  button.picker-ex-row {
+    text-align: left; background: none; border: none; color: var(--text-dim);
+    font-family: inherit; font-size: 14px; padding: 10px 8px; cursor: pointer;
+    min-height: var(--tap); border-radius: var(--r-xs);
+  }
+  button.picker-ex-row:active { color: var(--accent); background: var(--accent-soft); }
+  .picker-flat-list { display: flex; flex-direction: column; padding-top: 4px; }
+  .exercise-picker-footer {
+    flex: 0 0 auto; padding: 10px 15px calc(13px + env(safe-area-inset-bottom, 0px));
+    border-top: 1px solid var(--border);
+  }
+  .exercise-picker-custom[hidden] { display: none; }
+  .exercise-picker-custom { margin-top: 8px; }
+
+  .dropmyo-modal-body { padding: 13px 15px calc(15px + env(safe-area-inset-bottom, 0px)); }
 
   /* ===== New-week plan prompt =====
      Accent-bordered rather than another neutral card: it is the one thing on
@@ -1046,46 +1116,15 @@
         <select id="log-day-picker"></select>
       </div>
       <div id="active-workout-list"></div>
+      <!-- Opens the exercise picker (see #exercise-picker-modal) to add an
+           off-plan exercise to TODAY only, as a normal card with the usual
+           target sets/rep range — not a one-off typed-in weight the way the
+           old "Log a set manually" form worked. A drop set or myo cluster
+           for any exercise, planned or added, is logged from that
+           exercise's own card instead (see .drop-myo-toggle below) — see
+           #dropmyo-modal. -->
+      <button type="button" class="add-exercise-btn" id="add-exercise-btn">+ Add Exercise</button>
     </div>
-
-    <!-- Collapsed by default: with a plan loaded, the active-workout list
-         above is the main way to log, and this form is the escape hatch for
-         off-plan / drop / myo sets. Keeping it open pushed everything else
-         below the fold on a phone. -->
-    <details class="disclosure" id="manual-entry-disclosure">
-    <summary>Log a set manually</summary>
-    <form class="entry" id="entry-form">
-      <div class="field">
-        <label for="exercise-select">Exercise</label>
-        <select id="exercise-select"></select>
-        <div id="custom-exercise-form" style="display:none; margin-top:10px;">
-          <div class="field">
-            <label>New exercise name</label>
-            <input type="text" id="quick-ex-name" placeholder="e.g. Cable Pullover">
-          </div>
-          <div class="field">
-            <label>Primary muscle</label>
-            <select id="quick-ex-muscle"></select>
-          </div>
-          <button type="button" class="add-row" id="quick-ex-save" style="margin-bottom:0;">Add Exercise</button>
-        </div>
-      </div>
-
-      <div class="field">
-        <label for="set-type">Set type</label>
-        <select id="set-type">
-          <option value="standard">Standard</option>
-          <option value="drop">Drop set</option>
-          <option value="myo">Myo reps</option>
-        </select>
-      </div>
-
-      <div id="entry-rows-container" class="entry-rows"></div>
-      <button type="button" class="add-row" id="add-row-btn" style="display:none;">+ Add</button>
-
-      <button type="submit" class="add">Log Set</button>
-    </form>
-    </details>
 
   </div>
 
@@ -1530,6 +1569,65 @@
         <button type="button" class="prompt-modal-close" id="prompt-modal-close" aria-label="Close">×</button>
       </div>
       <pre class="prompt-modal-body" id="prompt-modal-body"></pre>
+    </div>
+  </div>
+
+  <!-- Shared by Swap (Workout tab, session-only; Plan tab, permanent) and
+       Add Exercise: every "pick an exercise" moment in the app opens this
+       one picker rather than each keeping its own inline <select>. Collapsed
+       muscle groups so browsing 90+ exercises doesn't mean one long scroll;
+       typing in the search box flattens straight to matches instead, for
+       when you already know the name. See openExercisePicker() (09-workout.js). -->
+  <div class="exercise-picker-modal" id="exercise-picker-modal" hidden>
+    <div class="exercise-picker-card">
+      <div class="exercise-picker-header">
+        <h3 id="exercise-picker-title">Choose an exercise</h3>
+        <button type="button" class="prompt-modal-close" id="exercise-picker-close" aria-label="Close">×</button>
+      </div>
+      <input type="search" id="exercise-picker-search" class="exercise-picker-search" placeholder="Search exercises…" autocomplete="off" spellcheck="false">
+      <div class="exercise-picker-body" id="exercise-picker-body"></div>
+      <div class="exercise-picker-footer">
+        <button type="button" class="link-btn" id="exercise-picker-add-new-toggle">Can't find it? Add a new exercise</button>
+        <div class="exercise-picker-custom" id="exercise-picker-custom" hidden>
+          <div class="field">
+            <label for="picker-new-ex-name">New exercise name</label>
+            <input type="text" id="picker-new-ex-name" placeholder="e.g. Cable Pullover">
+          </div>
+          <div class="field">
+            <label for="picker-new-ex-muscle">Primary muscle</label>
+            <select id="picker-new-ex-muscle"></select>
+          </div>
+          <button type="button" class="add-row" id="picker-new-ex-save" style="margin-bottom:0;">Create &amp; Select</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- A drop set or myo cluster against ONE exercise, opened from that
+       exercise's own card (.drop-myo-toggle in renderActiveWorkout) rather
+       than a standalone form with its own exercise picker — the exercise is
+       already known from whichever card was tapped. Reuses the same
+       repeatable weight/rep row mechanism the old "Log a set manually" form
+       used (entry-rows/entry-row/add-row/sign-btn are shared CSS), just
+       retargeted to whichever exercise is current (dropMyoExerciseId). -->
+  <div class="prompt-modal" id="dropmyo-modal" hidden>
+    <div class="prompt-modal-card">
+      <div class="prompt-modal-header">
+        <h3 id="dropmyo-modal-title">Log a drop set or myo reps</h3>
+        <button type="button" class="prompt-modal-close" id="dropmyo-close" aria-label="Close">×</button>
+      </div>
+      <div class="dropmyo-modal-body">
+        <div class="field">
+          <label for="dropmyo-type">Type</label>
+          <select id="dropmyo-type">
+            <option value="drop">Drop set</option>
+            <option value="myo">Myo reps</option>
+          </select>
+        </div>
+        <div id="dropmyo-rows-container" class="entry-rows"></div>
+        <button type="button" class="add-row" id="dropmyo-add-row-btn">+ Add</button>
+        <button type="button" class="add" id="dropmyo-log-btn">Log</button>
+      </div>
     </div>
   </div>
 

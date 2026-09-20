@@ -774,6 +774,50 @@
     return workout;
   }
 
+  // Ad-hoc "Add Exercise" — an exercise logged today with no corresponding
+  // plan-day slot, defaulting to a normal target/rep range instead of
+  // demanding a weight up front. Session-only, the same way the swap and
+  // target-set override above are: it lives on today's workout record, not
+  // the plan, so it's simply gone the next time this day comes around unless
+  // added again. A duplicate add (already a plan exercise or already added)
+  // is a silent no-op rather than a second slot for the same exercise — see
+  // the "ONE SLOT PER EXERCISE PER DAY" reasoning in generatePlanWithAI for
+  // why two slots sharing a data-exid is the specific bug that guards.
+  async function addExtraExercise(exerciseId, targetSets, repRangeMin, repRangeMax) {
+    return withWorkoutLock(() => addExtraExerciseLocked(exerciseId, targetSets, repRangeMin, repRangeMax));
+  }
+  async function addExtraExerciseLocked(exerciseId, targetSets, repRangeMin, repRangeMax) {
+    const date = todayStr();
+    let workout = await getWorkoutForDate(date);
+    if (!workout) workout = { date, ts: Date.now(), planId: null, dayIndex: null, dayName: null, exercises: [] };
+    if (!workout.extraExercises) workout.extraExercises = [];
+    if (!workout.extraExercises.some(e => e.exerciseId === exerciseId)) {
+      workout.extraExercises.push({ exerciseId, targetSets, repRangeMin, repRangeMax });
+      await putRecord('workouts', workout);
+    }
+    return workout;
+  }
+
+  // Undoes an accidental Add Exercise. Only removes the SLOT, and only while
+  // nothing has been logged against it yet — once a set exists the exercise
+  // is real training data, not a mistake to silently discard, so the card
+  // stays and the only way to walk it back is deleting the sets themselves
+  // (same as any other exercise).
+  async function removeExtraExercise(exerciseId) {
+    return withWorkoutLock(() => removeExtraExerciseLocked(exerciseId));
+  }
+  async function removeExtraExerciseLocked(exerciseId) {
+    const date = todayStr();
+    const workout = await getWorkoutForDate(date);
+    if (!workout || !workout.extraExercises) return workout;
+    const logged = workout.exercises.find(e => e.exerciseId === exerciseId);
+    if (logged && logged.sets.length > 0) return workout;
+    const before = workout.extraExercises.length;
+    workout.extraExercises = workout.extraExercises.filter(e => e.exerciseId !== exerciseId);
+    if (workout.extraExercises.length !== before) await putRecord('workouts', workout);
+    return workout;
+  }
+
   // =========================================================================
   // Persistent storage
   //

@@ -25,7 +25,7 @@
       // session, and was silently reverted on the next page load.
       ex.userEdited = true;
       await putRecord('exercises', ex);
-      await populateExerciseSelect();
+      invalidateExercisePicker();
     },
     'set-equipment': async (el) => {
       const exerciseId = Number(el.dataset.exid);
@@ -148,7 +148,7 @@
     await addRecord('exercises', { name, primaryMuscle: muscle, secondaryMuscles: [], equipment: classifyEquipmentFromName(name), custom: true });
     document.getElementById('new-exercise-form').reset();
     await renderExerciseManager();
-    await populateExerciseSelect();
+    invalidateExercisePicker();
     toast(`Added ${name}`);
   });
 
@@ -475,7 +475,7 @@
       // failed", which is what happened before and sent the user hunting for
       // a data problem that didn't exist.
       try {
-        await populateExerciseSelect();
+        invalidateExercisePicker();
         await renderExerciseManager();
         await refreshLogAndHistory();
         await refreshPlanTab();
@@ -1374,7 +1374,7 @@
       if (!BACKUP_EXCLUDED_SETTINGS.includes(key)) await setSetting(key, value);
     }
     invalidateWorkoutsCache();
-    invalidateSwapOptions();
+    invalidateExercisePicker();
   }
 
   let pendingRestore = null;
@@ -1498,7 +1498,7 @@
       // so a repaint failure must not be reported as a failed restore.
       try {
         await loadSettingsIntoForm();
-        await populateExerciseSelect();
+        invalidateExercisePicker();
         await renderExerciseManager();
         await refreshLogAndHistory();
         await refreshPlanTab();

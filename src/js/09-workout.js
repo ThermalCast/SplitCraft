@@ -1,34 +1,241 @@
   // 09-workout.js — Workout tab — active workout render
-  // The swap picker's <option> list — identical for every picker on screen, so
-  // it is built at most ONCE per render and then handed out.
-  //
-  // It used to take the current exercise id and bake `selected` into the
-  // markup, which forced a rebuild per exercise row: two full store reads and
-  // a fresh ~100-option string every time. A four-day plan with twelve slots
-  // therefore did twenty-four store reads and built twelve copies of the same
-  // list — and renderActiveWorkout repaints on EVERY logged set, so the Log
-  // tab paid it mid-workout, over and over. Selection is now set on the
-  // element (sel.value) instead, which is what makes the string shareable.
-  //
-  // Nothing is attached until a picker is actually opened, either: every
-  // .swap-picker starts hidden, so materialising a hundred option nodes inside
-  // each one was work for a control most sessions never touch.
-  let swapOptionsCache = null;
-  function invalidateSwapOptions() { swapOptionsCache = null; }
-  function exerciseOptionsHtml() {
-    if (!swapOptionsCache) swapOptionsCache = buildExerciseOptionsHtml();
-    return swapOptionsCache;
+  // The exercise picker's grouped list — identical for every picker on
+  // screen (Swap, Plan-tab Swap, Add Exercise), so it is built at most ONCE
+  // and shared. Rebuilding it is a full store read plus a sort, and a
+  // session may open the picker several times without a single exercise
+  // being added, edited or disliked in between.
+  let exercisePickerCache = null;
+  function invalidateExercisePicker() { exercisePickerCache = null; }
+  function groupedExercisesForPicker() {
+    if (!exercisePickerCache) exercisePickerCache = buildGroupedExercises();
+    return exercisePickerCache;
+  }
+  // Grouped by muscle in MUSCLES' own declared order (chest, delts,
+  // triceps, ... legs, core, unclassified) rather than alphabetically —
+  // related muscles land near each other, which matters when browsing
+  // rather than already knowing the exact name. Only muscles with at least
+  // one available (non-disliked) exercise are included.
+  async function buildGroupedExercises() {
+    const exercises = await getAllRecords('exercises');
+    const prefs = await getAllRecords('exercisePrefs');
+    const dislikedIds = new Set(prefs.filter(p => p.disliked).map(p => p.exerciseId));
+    const byMuscle = {};
+    exercises.filter(e => !dislikedIds.has(e.id)).forEach(ex => {
+      const mid = MUSCLES.some(m => m.id === ex.primaryMuscle) ? ex.primaryMuscle : 'unclassified';
+      if (!byMuscle[mid]) byMuscle[mid] = [];
+      byMuscle[mid].push(ex);
+    });
+    return MUSCLES.map(m => ({
+      id: m.id, name: m.name,
+      exercises: (byMuscle[m.id] || []).slice().sort((a, b) => a.name.localeCompare(b.name))
+    })).filter(g => g.exercises.length > 0);
   }
 
-  // Fills a picker's <select> on first open and selects the row's current
-  // exercise. Cheap and idempotent — re-opening a populated picker is a
-  // no-op beyond the toggle.
-  async function ensureSwapOptions(sel, currentExerciseId) {
-    if (!sel || sel.dataset.populated === 'yes') return;
-    sel.innerHTML = await exerciseOptionsHtml();
-    sel.dataset.populated = 'yes';
-    if (currentExerciseId != null) sel.value = String(currentExerciseId);
+  // =========================================================================
+  // Exercise picker — a full-screen search-or-browse modal shared by every
+  // "pick an exercise" moment in the app: the Workout tab's session-only
+  // Swap, the Plan tab's permanent Swap, and Add Exercise. Generic on
+  // purpose — the modal itself doesn't know or care what picking an
+  // exercise MEANS to its caller, it just resolves `onSelect` with an
+  // exerciseId and gets out of the way.
+  // =========================================================================
+  let exercisePickerOnSelect = null;
+  let exercisePickerExcludeIds = new Set();
+  // Which muscle groups are expanded, reset every time the picker opens —
+  // unlike expandedExercises/openHistoryPanels elsewhere in this file, this
+  // state has no reason to survive past a single picker visit.
+  const expandedPickerGroups = new Set();
+
+  async function openExercisePicker({ excludeIds, onSelect, title }) {
+    exercisePickerOnSelect = onSelect;
+    exercisePickerExcludeIds = excludeIds || new Set();
+    expandedPickerGroups.clear();
+    document.getElementById('exercise-picker-title').textContent = title || 'Choose an exercise';
+    const search = document.getElementById('exercise-picker-search');
+    search.value = '';
+    document.getElementById('exercise-picker-custom').hidden = true;
+    document.getElementById('picker-new-ex-name').value = '';
+    await renderExercisePickerBody('');
+    document.getElementById('exercise-picker-modal').hidden = false;
+    search.focus();
   }
+  function closeExercisePicker() {
+    document.getElementById('exercise-picker-modal').hidden = true;
+    exercisePickerOnSelect = null;
+  }
+
+  async function renderExercisePickerBody(query) {
+    const body = document.getElementById('exercise-picker-body');
+    const groups = await groupedExercisesForPicker();
+    const q = query.trim().toLowerCase();
+    let html;
+    if (q) {
+      // Searching flattens the muscle hierarchy — useful for browsing when
+      // you don't know what you want, but just friction once you're typing
+      // a name you already know.
+      const matches = [];
+      groups.forEach(g => g.exercises.forEach(ex => {
+        if (!exercisePickerExcludeIds.has(ex.id) && ex.name.toLowerCase().includes(q)) matches.push(ex);
+      }));
+      matches.sort((a, b) => a.name.localeCompare(b.name));
+      html = matches.length
+        ? `<div class="picker-flat-list">${matches.map(ex =>
+            `<button type="button" class="picker-ex-row" data-action="pick-exercise" data-exid="${ex.id}">${esc(ex.name)}</button>`
+          ).join('')}</div>`
+        : `<div class="empty">No exercises match "${esc(query.trim())}".</div>`;
+    } else {
+      html = groups.map(g => {
+        const visible = g.exercises.filter(ex => !exercisePickerExcludeIds.has(ex.id));
+        if (!visible.length) return '';
+        const open = expandedPickerGroups.has(g.id);
+        return `
+          <div class="picker-muscle-group">
+            <button type="button" class="picker-muscle-header" data-action="toggle-picker-group" data-muscle="${g.id}" aria-expanded="${open}">
+              <span>${esc(g.name)}</span>
+              <span class="picker-muscle-count">${visible.length}</span>
+            </button>
+            <div class="picker-muscle-list"${open ? '' : ' hidden'}>
+              ${visible.map(ex => `<button type="button" class="picker-ex-row" data-action="pick-exercise" data-exid="${ex.id}">${esc(ex.name)}</button>`).join('')}
+            </div>
+          </div>`;
+      }).join('');
+    }
+    body.innerHTML = html;
+    delegate(body, 'click', EXERCISE_PICKER_ACTIONS);
+  }
+
+  const EXERCISE_PICKER_ACTIONS = {
+    'pick-exercise': async (el) => {
+      const exerciseId = Number(el.dataset.exid);
+      const cb = exercisePickerOnSelect;
+      closeExercisePicker();
+      if (cb) await cb(exerciseId);
+    },
+    'toggle-picker-group': async (el) => {
+      const id = el.dataset.muscle;
+      if (expandedPickerGroups.has(id)) expandedPickerGroups.delete(id); else expandedPickerGroups.add(id);
+      await renderExercisePickerBody(document.getElementById('exercise-picker-search').value);
+    },
+  };
+
+  document.getElementById('exercise-picker-search').addEventListener('input', (e) => {
+    renderExercisePickerBody(e.target.value);
+  });
+  document.getElementById('exercise-picker-close').addEventListener('click', closeExercisePicker);
+  // Backdrop tap closes too — the modal IS its own backdrop (position:fixed,
+  // inset:0, opaque bg), so this only fires for a tap that lands outside the
+  // card, same pattern as the drop/myo and full-prompt modals below.
+  document.getElementById('exercise-picker-modal').addEventListener('click', (e) => {
+    if (e.target.id === 'exercise-picker-modal') closeExercisePicker();
+  });
+  document.getElementById('exercise-picker-add-new-toggle').addEventListener('click', () => {
+    const panel = document.getElementById('exercise-picker-custom');
+    panel.hidden = !panel.hidden;
+    if (!panel.hidden) document.getElementById('picker-new-ex-name').focus();
+  });
+  document.getElementById('picker-new-ex-save').addEventListener('click', async () => {
+    const name = document.getElementById('picker-new-ex-name').value.trim();
+    const muscle = document.getElementById('picker-new-ex-muscle').value;
+    if (!name) return;
+    // nameKey() is THE key for name matching (see its comment above) — reuse
+    // an existing exercise instead of forking a near-miss duplicate that
+    // would split that lift's history in two.
+    const existing = (await getAllRecords('exercises')).find(ex => nameKey(ex.name) === nameKey(name));
+    const id = existing ? existing.id : await addRecord('exercises', { name, primaryMuscle: muscle, secondaryMuscles: [], equipment: classifyEquipmentFromName(name), custom: true });
+    invalidateExercisePicker();
+    const cb = exercisePickerOnSelect;
+    closeExercisePicker();
+    if (cb) await cb(id);
+  });
+
+  // =========================================================================
+  // Drop set / myo reps — logged against ONE exercise at a time, opened from
+  // that exercise's own card (.drop-myo-toggle in renderActiveWorkout)
+  // rather than a standalone form with its own exercise picker, since the
+  // exercise is already known from whichever card was tapped.
+  //
+  // A drop set / myo cluster is a SEQUENCE of arbitrary weight×rep pairs
+  // (e.g. 100×8 → 80×6 → 60×5), not just a start/end weight — that's the
+  // actual data shape logSet() already stores (see 02-storage.js's schema
+  // comment), and collapsing it to two endpoints would lose the ability to
+  // record reps per stage or more than two drops. This reuses that shape
+  // exactly, just entered here instead of a top-level form.
+  // =========================================================================
+  let dropMyoExerciseId = null;
+  let dropMyoEntries = [{ weight: '', reps: '' }];
+
+  function openDropMyoModal(exerciseId, exerciseName) {
+    dropMyoExerciseId = exerciseId;
+    dropMyoEntries = [{ weight: '', reps: '' }];
+    document.getElementById('dropmyo-modal-title').textContent = `Log a drop set or myo reps — ${exerciseName}`;
+    document.getElementById('dropmyo-type').value = 'drop';
+    renderDropMyoRows();
+    document.getElementById('dropmyo-modal').hidden = false;
+  }
+  function closeDropMyoModal() {
+    document.getElementById('dropmyo-modal').hidden = true;
+    dropMyoExerciseId = null;
+  }
+
+  // Click actions for #dropmyo-rows-container: remove one entry row, or flip
+  // its weight's sign. Shares 'toggle-sign' with every other sign toggle.
+  const DROPMYO_ROW_ACTIONS = {
+    'remove-dropmyo-entry': (el) => { dropMyoEntries.splice(Number(el.dataset.idx), 1); renderDropMyoRows(); },
+    'toggle-sign': TOGGLE_SIGN_ACTIONS['toggle-sign'],
+  };
+  const DROPMYO_ROW_INPUT_ACTIONS = {
+    'sync-dropmyo-entry': (el) => {
+      dropMyoEntries[Number(el.dataset.idx)][el.dataset.field] = el.value;
+      if (el.dataset.field === 'weight') syncSignClass(el);
+    },
+  };
+
+  function renderDropMyoRows() {
+    const container = document.getElementById('dropmyo-rows-container');
+    container.innerHTML = '';
+    dropMyoEntries.forEach((entry, i) => {
+      const row = document.createElement('div');
+      row.className = 'entry-row';
+      const negative = parseFloat(entry.weight) < 0;
+      row.innerHTML = `
+        <button type="button" class="sign-btn${negative ? ' negative' : ''}" data-action="toggle-sign" title="Toggle negative — for assisted reps, enter how much weight is taken off you">±</button>
+        <input type="number" inputmode="decimal" step="0.5" placeholder="Weight (${weightUnit})" value="${entry.weight}" data-idx="${i}" data-field="weight" data-action="sync-dropmyo-entry">
+        <input type="number" inputmode="numeric" step="1" min="1" placeholder="Reps" value="${entry.reps}" data-idx="${i}" data-field="reps" data-action="sync-dropmyo-entry" class="entry-reps">
+        ${dropMyoEntries.length > 1 ? `<button type="button" class="rm" data-idx="${i}" data-action="remove-dropmyo-entry">×</button>` : ''}
+      `;
+      container.appendChild(row);
+    });
+    delegate(container, 'click', DROPMYO_ROW_ACTIONS);
+    delegate(container, 'input', DROPMYO_ROW_INPUT_ACTIONS);
+    const addBtn = document.getElementById('dropmyo-add-row-btn');
+    const type = document.getElementById('dropmyo-type').value;
+    addBtn.textContent = type === 'drop' ? '+ Add Drop' : '+ Add Myo Cluster';
+  }
+
+  document.getElementById('dropmyo-type').addEventListener('change', renderDropMyoRows);
+  document.getElementById('dropmyo-add-row-btn').addEventListener('click', () => {
+    dropMyoEntries.push({ weight: '', reps: '' });
+    renderDropMyoRows();
+  });
+  document.getElementById('dropmyo-close').addEventListener('click', closeDropMyoModal);
+  document.getElementById('dropmyo-modal').addEventListener('click', (e) => {
+    if (e.target.id === 'dropmyo-modal') closeDropMyoModal();
+  });
+  document.getElementById('dropmyo-log-btn').addEventListener('click', async () => {
+    if (dropMyoExerciseId == null) return;
+    const exerciseId = dropMyoExerciseId;
+    const type = document.getElementById('dropmyo-type').value;
+    const entries = dropMyoEntries.map(en => ({ weight: toKg(parseFloat(en.weight)), reps: parseInt(en.reps, 10) }));
+    if (entries.some(en => isNaN(en.weight) || isNaN(en.reps))) return;
+    const workout = await logSet(exerciseId, type, entries, null);
+    if (await getSetting('rirPromptEnabled', true)) {
+      const logged = workout.exercises.find(e => e.exerciseId === exerciseId);
+      if (logged) showRirPrompt({ workoutId: workout.id, exerciseId, setIndex: logged.sets.length - 1, setTs: logged.sets[logged.sets.length - 1].ts });
+    }
+    closeDropMyoModal();
+    startRestTimer();
+    await refreshLogAndHistory();
+  });
 
   // Every previous session for one exercise, for the Log tab's per-exercise
   // History panel.
@@ -80,26 +287,6 @@
     return body + more;
   }
 
-  async function buildExerciseOptionsHtml() {
-    const exercises = await getAllRecords('exercises');
-    const prefs = await getAllRecords('exercisePrefs');
-    const dislikedIds = new Set(prefs.filter(p => p.disliked).map(p => p.exerciseId));
-    const musclesById = Object.fromEntries(MUSCLES.map(m => [m.id, m]));
-    const groups = {};
-    exercises.filter(e => !dislikedIds.has(e.id)).forEach(ex => {
-      const mname = (musclesById[ex.primaryMuscle] || { name: 'Other' }).name;
-      if (!groups[mname]) groups[mname] = [];
-      groups[mname].push(ex);
-    });
-    return Object.keys(groups).sort().map(mname => `
-      <optgroup label="${esc(mname)}">
-        ${groups[mname].sort((a, b) => a.name.localeCompare(b.name)).map(ex =>
-          `<option value="${ex.id}">${esc(ex.name)}</option>`
-        ).join('')}
-      </optgroup>
-    `).join('');
-  }
-
   // Render-time context for the active-workout delegated actions below \u2014
   // the values their closures used to capture directly (plan, the day being
   // shown, the pre-loaded workouts/exercises lookups, today's date string).
@@ -111,14 +298,16 @@
   // see the row/button attributes below.
   let activeWorkoutCtx = null;
 
-  // Which exercise's History panel / Swap picker is open, keyed by the
-  // effective exercise id \u2014 same pattern as expandedExercises (05-history.js)
-  // and for the same reason: renderActiveWorkout() rebuilds this whole
-  // section's innerHTML on every logged set, so without tracking it here a
-  // panel opened to check "what did I do last time" on one exercise would
-  // snap shut the moment a DIFFERENT exercise's set was logged.
+  // Which exercise's History panel is open, keyed by the effective exercise
+  // id \u2014 same pattern as expandedExercises (05-history.js) and for the same
+  // reason: renderActiveWorkout() rebuilds this whole section's innerHTML
+  // on every logged set, so without tracking it here a panel opened to
+  // check "what did I do last time" on one exercise would snap shut the
+  // moment a DIFFERENT exercise's set was logged. Swap has no equivalent
+  // any more \u2014 it opens the full-screen exercise picker (a fixed top-level
+  // element, not part of this re-rendered list) rather than an inline
+  // picker that needed its own open-state tracked here.
   const openHistoryPanels = new Set();
-  const openSwapPickers = new Set();
 
   const WORKOUT_CLICK_ACTIONS = {
     'log-set': async (el) => {
@@ -214,14 +403,30 @@
     'swap-open': async (el) => {
       const group = el.closest('.exercise-group');
       if (!group) return;
-      const picker = group.querySelector('.swap-picker');
-      if (!picker) return;
-      const id = Number(group.dataset.exid);
-      await ensureSwapOptions(picker.querySelector('.swap-select'), id);
-      const opening = picker.style.display !== 'block';
-      picker.style.display = opening ? 'block' : 'none';
-      // See the matching comment on openHistoryPanels above — same reason.
-      if (opening) openSwapPickers.add(id); else openSwapPickers.delete(id);
+      const origExerciseId = Number(group.dataset.origExid);
+      const currentEffectiveId = Number(group.dataset.exid);
+      await openExercisePicker({
+        title: 'Swap for today',
+        excludeIds: new Set([currentEffectiveId]),
+        onSelect: async (newExerciseId) => {
+          await setSessionSwap(origExerciseId, newExerciseId);
+          await refreshActiveWorkoutSection();
+        }
+      });
+    },
+    'remove-extra': async (el) => {
+      const group = el.closest('.exercise-group');
+      if (!group) return;
+      const exerciseId = Number(group.dataset.exid);
+      await removeExtraExercise(exerciseId);
+      await refreshActiveWorkoutSection();
+    },
+    'open-drop-myo': (el) => {
+      const group = el.closest('.exercise-group');
+      if (!group) return;
+      const exerciseId = Number(group.dataset.exid);
+      const rec = activeWorkoutCtx.exercisesById[exerciseId];
+      openDropMyoModal(exerciseId, rec ? rec.name : 'this exercise');
     },
     'adjust-sets': async (el) => {
       const group = el.closest('.exercise-group');
@@ -235,9 +440,7 @@
     'toggle-sign': TOGGLE_SIGN_ACTIONS['toggle-sign'],
   };
   // 'edit-set' change: commits an inline weight/reps edit on a logged
-  // standard set \u2014 see "Editing a logged set" in the design summary.
-  // 'swap-select' change: the session-only swap (never touches the plan
-  // record \u2014 compare the Plan tab's PERMANENT swap in renderPlanDayOverview).
+  // standard set — see "Editing a logged set" in the design summary.
   const WORKOUT_CHANGE_ACTIONS = {
     'edit-set': async (el) => {
       const row = el.closest('.plan-log-row');
@@ -256,16 +459,6 @@
       await updateStandardSet(w.id, exerciseId, setIndex, weightToStore(weight, originalKg), reps);
       await refreshLogAndHistory();
     },
-    'swap-select': async (el) => {
-      const group = el.closest('.exercise-group');
-      if (!group) return;
-      const origExerciseId = Number(group.dataset.origExid);
-      const currentEffectiveId = Number(group.dataset.exid);
-      const newExerciseId = Number(el.value);
-      if (newExerciseId === currentEffectiveId) return;
-      await setSessionSwap(origExerciseId, newExerciseId);
-      await refreshActiveWorkoutSection();
-    },
   };
   // Same reuse-the-data-action-value pattern as History's 'edit-set': the
   // 'input' event on a done row's weight input only ever needs the cosmetic
@@ -277,7 +470,7 @@
     'sync-sign': (el) => syncSignClass(el),
   };
 
-  // The Log tab's "active workout" \u2014 this is where sets actually get logged
+  // The Log tab's "active workout" — this is where sets actually get logged
   // against today's plan day. Anything changed here (session-only swap,
   // today-only target-set override) is scoped to today's `workouts` record
   // only; it never touches the plan itself. Compare renderPlanDayOverview
@@ -285,11 +478,10 @@
   async function renderActiveWorkout(plan, dayIdx, workouts) {
     const day = plan.days[dayIdx];
     const container = document.getElementById('active-workout-list');
-    container.innerHTML = '<div class="empty">Working out your next sets\u2026</div>';
+    container.innerHTML = '<div class="empty">Working out your next sets…</div>';
     const today = todayStr();
-    // Shared option list is rebuilt at most once for this render \u2014 see
-    // exerciseOptionsHtml().
-    invalidateSwapOptions();
+    // Shared exercise-picker list is rebuilt at most once for this render.
+    invalidateExercisePicker();
     // Read the workout store ONCE for the whole render. Every exercise on the
     // day needs the full history for its progression suggestion, and
     // suggestForExercise() used to fetch and deserialise the entire store for
@@ -311,22 +503,32 @@
     // See the comment on activeWorkoutCtx's declaration above.
     activeWorkoutCtx = { plan, dayIdx, day, today, allWorkouts, exercisesById };
     const todayWorkout = allWorkouts.find(w => w.date === today) || null;
-    const rows = [];
-    for (const ex of day.exercises) {
-      const swappedId = todayWorkout && todayWorkout.exerciseSwaps ? todayWorkout.exerciseSwaps[ex.exerciseId] : undefined;
+
+    // Builds one exercise-group card. `slot` mirrors a plan day's exercise
+    // shape ({exerciseId, name, targetSets, repRangeMin, repRangeMax})
+    // whether it actually came from the plan or from today's ad-hoc
+    // extraExercises (Add Exercise) — the suggestion, set rows, history
+    // panel and target-set adjustment all work identically either way.
+    // `allowSwap` is false for an extra: there's no plan slot whose identity
+    // needs preserving, so swapping one exercise for another isn't "same
+    // slot, different movement" the way it is for a planned exercise — you'd
+    // just remove it and add the one you meant. `allowRemove` offers that
+    // undo, but only while nothing's logged yet (see removeExtraExerciseLocked).
+    async function buildCard(slot, { allowSwap, allowRemove }) {
+      const swappedId = allowSwap && todayWorkout && todayWorkout.exerciseSwaps ? todayWorkout.exerciseSwaps[slot.exerciseId] : undefined;
       const isSwapped = swappedId != null;
-      const effectiveExerciseId = isSwapped ? swappedId : ex.exerciseId;
-      let effectiveName = ex.name;
+      const effectiveExerciseId = isSwapped ? swappedId : slot.exerciseId;
+      let effectiveName = slot.name;
       if (isSwapped) {
         const swappedEx = exercisesById[swappedId];
-        effectiveName = swappedEx ? swappedEx.name : ex.name;
+        effectiveName = swappedEx ? swappedEx.name : slot.name;
       }
-      const suggestion = await suggestForExercise(effectiveExerciseId, ex.repRangeMin, ex.repRangeMax, ex.targetSets, allWorkouts, exercisesById);
+      const suggestion = await suggestForExercise(effectiveExerciseId, slot.repRangeMin, slot.repRangeMax, slot.targetSets, allWorkouts, exercisesById);
       const exEntry = todayWorkout ? todayWorkout.exercises.find(e => e.exerciseId === effectiveExerciseId) : null;
       const todaySets = exEntry ? exEntry.sets : [];
       const doneCount = todaySets.length;
       const overrideVal = todayWorkout && todayWorkout.targetOverrides ? todayWorkout.targetOverrides[effectiveExerciseId] : undefined;
-      const effectiveTarget = overrideVal != null ? overrideVal : ex.targetSets;
+      const effectiveTarget = overrideVal != null ? overrideVal : slot.targetSets;
       const isOverridden = overrideVal != null;
       const isComplete = doneCount >= effectiveTarget && effectiveTarget > 0;
       const isOpen = !isComplete || expandedExercises.has(effectiveExerciseId);
@@ -343,9 +545,9 @@
       // eager sync() call, since each usage below already knows the value
       // it's about to render.
       const signBtnHtml = (negative) => allowNegative
-        ? `<button type="button" class="sign-btn${negative ? ' negative' : ''}" data-action="toggle-sign" title="Toggle negative \u2014 for assisted reps, enter how much weight is taken off you">\u00b1</button>`
+        ? `<button type="button" class="sign-btn${negative ? ' negative' : ''}" data-action="toggle-sign" title="Toggle negative — for assisted reps, enter how much weight is taken off you">±</button>`
         : '';
-      // Only before anything's logged today \u2014 once a set is on the board the
+      // Only before anything's logged today -- once a set is on the board the
       // lifter is already warmed up, and the suggestion row below stops being
       // about the FIRST set of the exercise.
       const warmups = doneCount === 0 ? warmupSets(suggestion.weight, exercisesById[effectiveExerciseId]) : [];
@@ -362,7 +564,7 @@
                 ${signBtnHtml(s.entries[0].weight < 0)}
                 <input type="number" inputmode="decimal" step="0.5" class="set-edit-weight" data-action="edit-set" aria-label="Weight" value="${displayWeight(s.entries[0].weight)}">
                 <input type="number" inputmode="numeric" step="1" min="1" class="set-edit-reps" data-action="edit-set" aria-label="Reps" value="${s.entries[0].reps}">
-                <button class="del" data-exid="${effectiveExerciseId}" data-idx="${i}" data-action="delete-set" title="Delete set">\u00d7</button>
+                <button class="del" data-exid="${effectiveExerciseId}" data-idx="${i}" data-action="delete-set" title="Delete set">×</button>
               </div>
             `;
           } else {
@@ -370,7 +572,7 @@
               <div class="set-row">
                 <span class="set-idx">${setNum}</span>
                 <span class="set-data">${esc(formatSetLine(s))}</span>
-                <button class="del" data-exid="${effectiveExerciseId}" data-idx="${i}" data-action="delete-set" title="Delete set">\u00d7</button>
+                <button class="del" data-exid="${effectiveExerciseId}" data-idx="${i}" data-action="delete-set" title="Delete set">×</button>
               </div>
             `;
           }
@@ -403,31 +605,32 @@
       //
       // `expandedExercises` survives the re-render, so re-opening one to fix
       // a mis-logged set doesn't snap shut on the next refresh. `openHistoryPanels`
-      // / `openSwapPickers` do the same for the History panel and Swap picker
-      // below \u2014 see their declaration up top.
-      const setSummary = todaySets.map(st => formatSetLine(st)).join(' \u00b7 ');
+      // does the same for the History panel -- see their declaration up top.
+      const setSummary = todaySets.map(st => formatSetLine(st)).join(` · `);
       const historyOpen = openHistoryPanels.has(effectiveExerciseId);
-      const swapOpen = openSwapPickers.has(effectiveExerciseId);
-      rows.push(`
-        <div class="exercise-group${isComplete ? ' complete' : ''}${isOpen ? '' : ' collapsed'}" data-exid="${effectiveExerciseId}" data-orig-exid="${ex.exerciseId}" data-target="${effectiveTarget}">
+      const canRemove = allowRemove && doneCount === 0;
+      const secondaryBtn = isComplete
+        ? `<button type="button" class="ex-toggle" data-action="toggle-exercise" aria-expanded="${isOpen}" aria-label="${isOpen ? 'Collapse' : 'Expand'} ${esc(effectiveName)}" title="${isOpen ? 'Collapse' : 'Expand to edit'}">${isOpen ? '⌃' : '⌄'}</button>`
+        : allowSwap
+          ? `<button type="button" class="swap-btn" data-action="swap-open">Swap</button>`
+          : canRemove
+            ? `<button type="button" class="remove-ex-btn" data-action="remove-extra" title="Remove — nothing logged yet">Remove</button>`
+            : '';
+      return `
+        <div class="exercise-group${isComplete ? ' complete' : ''}${isOpen ? '' : ' collapsed'}" data-exid="${effectiveExerciseId}" data-orig-exid="${slot.exerciseId}" data-target="${effectiveTarget}">
           <div class="ex-name">
-            <span>${isComplete ? '<span class="ex-tick">\u2713</span> ' : ''}${esc(effectiveName)}${isSwapped ? ` <span class="override-note">swapped today</span>` : ''}</span>
+            <span>${isComplete ? '<span class="ex-tick">✓</span> ' : ''}${esc(effectiveName)}${isSwapped ? ` <span class="override-note">swapped today</span>` : ''}${!allowSwap ? ` <span class="override-note">added today</span>` : ''}</span>
             <span class="ex-actions">
               <button type="button" class="hist-btn" data-action="show-history" aria-expanded="${historyOpen}" aria-label="Previous sessions of ${esc(effectiveName)}" title="Previous sessions">History</button>
-              ${isComplete
-                ? `<button type="button" class="ex-toggle" data-action="toggle-exercise" aria-expanded="${isOpen}" aria-label="${isOpen ? 'Collapse' : 'Expand'} ${esc(effectiveName)}" title="${isOpen ? 'Collapse' : 'Expand to edit'}">${isOpen ? '\u2303' : '\u2304'}</button>`
-                : `<button type="button" class="swap-btn" data-action="swap-open">Swap</button>`}
+              ${secondaryBtn}
             </span>
           </div>
           ${isComplete && !isOpen ? `<div class="meta-row ex-digest">${esc(setSummary)}</div>` : ''}
-          <div class="swap-picker"${swapOpen ? ' style="display:block"' : ''}>
-            <select class="swap-select" data-action="swap-select" aria-label="Swap ${esc(effectiveName)} for today"></select>
-          </div>
           <div class="ex-history"${historyOpen ? ' style="display:block" data-rendered="yes"' : ''}>${historyOpen ? exerciseHistoryHtml(effectiveExerciseId, allWorkouts, exercisesById[effectiveExerciseId]) : ''}</div>
           <div class="meta-row">
-            <button type="button" class="today-set-adj" data-action="adjust-sets" data-delta="-1" data-plan-target="${ex.targetSets}" title="Skip a set today \u2014 reverts automatically next time this day comes around">\u2212</button>
-            <span>${effectiveTarget} sets \u00d7 ${ex.repRangeMin}-${ex.repRangeMax} reps</span>
-            <button type="button" class="today-set-adj" data-action="adjust-sets" data-delta="1" data-plan-target="${ex.targetSets}" title="Add a set today \u2014 reverts automatically next time this day comes around">+</button>
+            <button type="button" class="today-set-adj" data-action="adjust-sets" data-delta="-1" data-plan-target="${slot.targetSets}" title="Skip a set today — reverts automatically next time this day comes around">−</button>
+            <span>${effectiveTarget} sets × ${slot.repRangeMin}-${slot.repRangeMax} reps</span>
+            <button type="button" class="today-set-adj" data-action="adjust-sets" data-delta="1" data-plan-target="${slot.targetSets}" title="Add a set today — reverts automatically next time this day comes around">+</button>
             ${isOverridden ? `<span class="override-note">today only</span>` : ''}
             ${doneCount ? `<span class="done-count">${doneCount}/${effectiveTarget} logged</span>` : ''}
           </div>
@@ -440,23 +643,29 @@
             <span>Warm-up</span>
             ${warmups.map(w => `<span class="sugg-tag">${displayWeight(w.weightKg)}${weightUnit} × ${w.reps}</span>`).join('')}
           </div>` : ''}
+          <div class="meta-row drop-myo-toggle">
+            <button type="button" class="link-btn" data-action="open-drop-myo">+ Log a drop set or myo reps</button>
+          </div>
           ${setRowsHtml}
         </div>
-      `);
+      `;
+    }
+
+    const rows = [];
+    for (const ex of day.exercises) {
+      rows.push(await buildCard(ex, { allowSwap: true, allowRemove: false }));
+    }
+    if (todayWorkout && todayWorkout.extraExercises) {
+      for (const ex of todayWorkout.extraExercises) {
+        const rec = exercisesById[ex.exerciseId];
+        rows.push(await buildCard(
+          { exerciseId: ex.exerciseId, name: rec ? rec.name : 'Unknown exercise',
+            targetSets: ex.targetSets, repRangeMin: ex.repRangeMin, repRangeMax: ex.repRangeMax },
+          { allowSwap: false, allowRemove: true }
+        ));
+      }
     }
     container.innerHTML = rows.join('');
-
-    // Reopened pickers (see openSwapPickers above) render already visible
-    // via the inline style baked into the markup, but the <select> itself
-    // is still empty — ensureSwapOptions() is what a click normally does,
-    // called here instead so the picker isn't visible-but-blank after a set
-    // gets logged on another exercise.
-    for (const exid of openSwapPickers) {
-      const group = container.querySelector(`.exercise-group[data-exid="${exid}"]`);
-      if (!group) { openSwapPickers.delete(exid); continue; }
-      const picker = group.querySelector('.swap-picker');
-      if (picker) await ensureSwapOptions(picker.querySelector('.swap-select'), exid);
-    }
 
     // After a log the list shrinks -- completed exercises collapse and the
     // page gets shorter -- and the browser clamps the scroll position to the
@@ -474,6 +683,35 @@
     delegate(container, 'change', WORKOUT_CHANGE_ACTIONS);
     delegate(container, 'input', WORKOUT_INPUT_ACTIONS);
   }
+
+  // Opens the exercise picker to add an off-plan exercise to TODAY only,
+  // as a normal card (target sets/rep range from Settings' plan defaults,
+  // same as a fresh plan would use) rather than the old "Log a set
+  // manually" form's one typed-in weight. Lives inside #active-workout-wrap
+  // (hidden along with everything else when there's no active plan), so
+  // activeWorkoutCtx is always populated whenever this can actually fire.
+  document.getElementById('add-exercise-btn').addEventListener('click', async () => {
+    if (!activeWorkoutCtx) return;
+    const { day, allWorkouts, today } = activeWorkoutCtx;
+    const todayWorkout = allWorkouts.find(w => w.date === today) || null;
+    const excludeIds = new Set(day.exercises.map(ex => ex.exerciseId));
+    if (todayWorkout && todayWorkout.exerciseSwaps) {
+      Object.values(todayWorkout.exerciseSwaps).forEach(id => excludeIds.add(id));
+    }
+    if (todayWorkout && todayWorkout.extraExercises) {
+      todayWorkout.extraExercises.forEach(ex => excludeIds.add(ex.exerciseId));
+    }
+    const repMin = Number(await getSetting('planRepMin', 0)) || 8;
+    const repMax = Number(await getSetting('planRepMax', 0)) || 12;
+    await openExercisePicker({
+      title: 'Add an exercise',
+      excludeIds,
+      onSelect: async (exerciseId) => {
+        await addExtraExercise(exerciseId, 3, repMin, repMax);
+        await refreshActiveWorkoutSection();
+      }
+    });
+  });
 
   // Weight/rep fields select their whole value on focus, so tapping into one
   // that already has a number in it (a suggested weight, a logged set being

@@ -157,17 +157,18 @@ async function fireAction(label, fn) {
   catch (e) { actionsFailed++; console.log(`  FAIL action ${label}: ${e.message}`); }
 }
 
-// --- ENTRY_ROW_ACTIONS / ENTRY_ROW_INPUT_ACTIONS (03-helpers.js) ----------
-// sync-entry before remove-entry: remove-entry splices `currentEntries`
-// (module-level state, shared with the real app), so it must run last.
-await fireAction('sync-entry', () => registries.ENTRY_ROW_INPUT_ACTIONS['sync-entry'](actionStub({ idx: '0', field: 'weight' }, '42')));
+// --- DROPMYO_ROW_ACTIONS / DROPMYO_ROW_INPUT_ACTIONS (09-workout.js) ------
+// sync-dropmyo-entry before remove-dropmyo-entry: remove splices
+// `dropMyoEntries` (module-level state, shared with the real app), so it
+// must run last.
+await fireAction('sync-dropmyo-entry', () => registries.DROPMYO_ROW_INPUT_ACTIONS['sync-dropmyo-entry'](actionStub({ idx: '0', field: 'weight' }, '42')));
 {
   const { btn, input } = signPair(60);
-  await fireAction('toggle-sign (entry row)', () => registries.ENTRY_ROW_ACTIONS['toggle-sign'](btn));
+  await fireAction('toggle-sign (dropmyo row)', () => registries.DROPMYO_ROW_ACTIONS['toggle-sign'](btn));
   check('toggle-sign negates the weight input and marks the button negative',
     Number(input.value) === -60 && btn.classList.contains('negative'));
 }
-await fireAction('remove-entry', () => registries.ENTRY_ROW_ACTIONS['remove-entry'](actionStub({ idx: '0' })));
+await fireAction('remove-dropmyo-entry', () => registries.DROPMYO_ROW_ACTIONS['remove-dropmyo-entry'](actionStub({ idx: '0' })));
 
 // --- HISTORY_* (05-history.js) — a PAST day's workout, so it's independent
 // of the "today" workout the WORKOUT_* actions below also mutate. ----------
@@ -272,13 +273,16 @@ await fireAction('toggle-exercise', () => registries.WORKOUT_CLICK_ACTIONS['togg
   check('show-history rendered the history panel', typeof panel.innerHTML === 'string' && panel.dataset.rendered === 'yes');
 }
 {
-  const group = actionStub({ exid: String(dayExId) });
-  const picker = actionStub();
-  picker.style = {};
-  const sel = actionStub();
-  picker.querySelector = () => sel;
-  group.querySelector = (s) => s === '.swap-picker' ? picker : actionStub();
+  const group = actionStub({ exid: String(dayExId), origExid: String(dayExId) });
   await fireAction('swap-open', () => registries.WORKOUT_CLICK_ACTIONS['swap-open'](group));
+  check('swap-open opened the exercise picker', app.document.getElementById('exercise-picker-modal').hidden === false);
+  // Completing the picker (as if a row had been tapped) should commit the
+  // session-only swap via the picker's onSelect callback.
+  await fireAction('pick-exercise (workout swap)', () => registries.EXERCISE_PICKER_ACTIONS['pick-exercise'](actionStub({ exid: String(otherExId) })));
+  const afterSwap = await app.getWorkoutForDate(today);
+  check('swap-open -> pick-exercise actually recorded the session swap',
+    !!(afterSwap && afterSwap.exerciseSwaps && afterSwap.exerciseSwaps[dayExId] === otherExId),
+    JSON.stringify(afterSwap && afterSwap.exerciseSwaps));
 }
 {
   const { idx } = await logFreshSet(dayExId, 60, 8);
@@ -295,9 +299,6 @@ await fireAction('toggle-exercise', () => registries.WORKOUT_CLICK_ACTIONS['togg
   const entry = after.exercises.find(e => e.exerciseId === dayExId);
   check('WORKOUT edit-set actually rewrote the set', entry.sets[idx].entries[0].reps === 5);
 }
-await fireAction('swap-select', () => registries.WORKOUT_CHANGE_ACTIONS['swap-select'](
-  actionStub({ origExid: String(dayExId), exid: String(dayExId) }, String(otherExId))
-));
 {
   const before = await app.getWorkoutForDate(today);
   const beforeOverride = before && before.targetOverrides ? before.targetOverrides[dayExId] : undefined;
@@ -321,22 +322,13 @@ await fireAction('swap-select', () => registries.WORKOUT_CHANGE_ACTIONS['swap-se
 // --- PLAN_DAY_* (11-plan.js) ------------------------------------------------
 await app.refreshPlanTab();
 {
-  const group = actionStub({ exid: String(dayExId) });
-  const picker = actionStub();
-  picker.style = {};
-  const sel = actionStub();
-  picker.querySelector = () => sel;
-  group.querySelector = (s) => s === '.swap-picker' ? picker : actionStub();
+  const group = actionStub({ exid: String(dayExId), planid: String(plan.id), dayidx: '0' });
   await fireAction('plan-swap-open', () => registries.PLAN_DAY_CLICK_ACTIONS['plan-swap-open'](group));
-}
-{
-  const group = actionStub({ exid: String(dayExId) });
-  const el = actionStub({ planid: String(plan.id), dayidx: '0' }, String(otherExId));
-  el.closest = () => group;
-  await fireAction('plan-swap-select', () => registries.PLAN_DAY_CHANGE_ACTIONS['plan-swap-select'](el));
+  check('plan-swap-open opened the exercise picker', app.document.getElementById('exercise-picker-modal').hidden === false);
+  await fireAction('pick-exercise (plan swap)', () => registries.EXERCISE_PICKER_ACTIONS['pick-exercise'](actionStub({ exid: String(otherExId) })));
   const updatedPlan = await app.getRecord('plans', plan.id);
   const stillHasOld = updatedPlan.days[0].exercises.some(e => e.exerciseId === dayExId);
-  check('plan-swap-select actually rewrote the plan day', !stillHasOld);
+  check('plan-swap-open -> pick-exercise actually rewrote the plan day', !stillHasOld);
 }
 
 console.log(`\nregistry actions fired: ${actionsFired}, failures: ${actionsFailed}`);

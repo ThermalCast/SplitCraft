@@ -549,11 +549,46 @@ freshly regenerated plan (a new id every time, see `generatePlanWithAI`)
 correctly starts the rotation over at day 0 rather than inheriting a stale
 index from whatever plan came before it.
 
-**Manual entry.** A free-form entry form below the active-workout section —
-exercise picker, any set type — for logging things off-plan (warm-ups,
-extra accessory work) without needing a plan slot. It is collapsed into a
-`<details>` disclosure by default; with a plan loaded the active-workout
-list is the main way to log, and the form is the escape hatch.
+**Add Exercise.** A single button below the active-workout list — no longer
+the old free-form "Log a set manually" form. Opens the exercise picker (see
+below); picking one appends it to `workout.extraExercises` (session-only,
+default `targetSets: 3` and the Settings plan rep range) via
+`addExtraExercise()`, and it renders as a normal card — suggestion, warm-up,
+set rows — identically to a plan exercise, just tagged "added today" instead
+of showing a Swap button. Excludes exercises already on the day (plan slots,
+their session swaps, and anything already added) so picking twice can't
+create two slots for one exercise. A card with nothing logged against it yet
+gets a "Remove" button instead of Swap (`removeExtraExercise()` — refuses
+once a set exists, since real training data isn't a mistake to silently
+discard).
+
+**Exercise picker.** A full-screen modal (`openExercisePicker()`,
+09-workout.js) shared by every "pick an exercise" moment in the app: Add
+Exercise above, the Workout tab's session-only Swap, and the Plan tab's
+permanent Swap. Search at the top flattens straight to matching names, since
+typing a name you already know shouldn't require picking a muscle group
+first; with no query, exercises are grouped by muscle in `MUSCLES`' own
+order (not alphabetical — related muscles land near each other) and each
+group starts collapsed, so browsing 90+ exercises isn't one long scroll. A
+"Can't find it? Add a new exercise" footer reveals the same quick-add
+(name + muscle) every entry point used to have, and selects the new exercise
+immediately. The modal itself is generic — `{ excludeIds, onSelect, title }`
+— it has no idea whether a pick means a swap or an addition; that's entirely
+the caller's business. Grouped-list building
+(`groupedExercisesForPicker()`/`buildGroupedExercises()`) is cached the same
+way the old `<select>`'s option list was — one full store read and sort per
+opening, invalidated (`invalidateExercisePicker()`) wherever the catalog
+changes (an exercise added, its muscle reassigned, an import or restore).
+
+**Drop sets and myo reps** are logged from the exercise's own card now, not
+a separate form: a "+ Log a drop set or myo reps" link opens a small modal
+(`openDropMyoModal()`) scoped to that one exercise, pre-titled with its name.
+The entry mechanism itself — repeatable weight×reps rows, "+ Add Drop"/"+ Add
+Myo Cluster", per-row sign toggle — is unchanged from the old top-level form,
+just relocated; a drop set is still a SEQUENCE of arbitrary weight/rep pairs
+(not a start/end weight), because that's the actual data shape `logSet()`
+stores and collapsing it to two endpoints would lose the ability to record
+reps per stage or more than two drops.
 
 **Per-exercise History panel.** Each exercise card has a History button
 opening an inline panel of previous sessions (date, days-ago, sets, volume)
@@ -1689,7 +1724,7 @@ minority who want it.
 ### Writes are serialised
 
 Every workout mutation is read → mutate → write with an `await` in the
-middle, and they all contend for one record: today's workout. The nine
+middle, and they all contend for one record: today's workout. The eleven
 mutators queue behind **`withWorkoutLock()`**, since IndexedDB transactions
 alone can't fix this (the read and write are separate transactions with
 application logic between them). Reads are untouched. The Log button
@@ -1899,8 +1934,8 @@ A pass specifically for mid-workout, one-handed, phone use:
 - **Session and volume share one card** as a two-column `.stat-grid`; the
   session value is colour-coded by state (dim when not started, green while
   running).
-- **The manual entry form is collapsed into a `<details>` disclosure** by
-  default (see "Manual entry" above).
+- **Add Exercise is one button, not a disclosure** — see "Add Exercise"
+  above. The old collapsed `<details>` form is gone along with it.
 - Native selects are restyled with an inline SVG chevron (data URI) instead
   of the platform default.
 - The weekly-progress card has a bar that fills toward the target and turns
@@ -2248,7 +2283,7 @@ branch and both created one, and because the `date` index wasn't unique,
 `getWorkoutForDate()` only ever found the first — the second day's sets
 vanished from the active workout and from today's volume while still
 appearing as a duplicate "Today" row in History. Fixed with
-`withWorkoutLock()` serialising the nine mutators; IndexedDB transactions
+`withWorkoutLock()` serialising the eleven mutators; IndexedDB transactions
 alone couldn't fix it since the read and write are separate transactions
 with application logic in between.
 

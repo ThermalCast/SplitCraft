@@ -619,7 +619,7 @@
     // units must re-display it, never re-read the box as if it had changed.
     refreshBodyweightField();
     refreshExperienceHint();
-    renderEntryRows();
+    renderDropMyoRows();
     await refreshLogAndHistory();
     await refreshPlanTab();
     toast(`Now showing weights in ${weightUnit}`);

@@ -57,16 +57,16 @@
   // longer exist now that wiring is delegated.
   function actionRegistries() {
     return {
-      ENTRY_ROW_ACTIONS, ENTRY_ROW_INPUT_ACTIONS,
       HISTORY_CLICK_ACTIONS, HISTORY_CHANGE_ACTIONS, HISTORY_INPUT_ACTIONS, PROGRESS_CHART_ACTIONS,
       EXERCISE_MANAGER_CLICK_ACTIONS, EXERCISE_MANAGER_CHANGE_ACTIONS,
       WORKOUT_CLICK_ACTIONS, WORKOUT_CHANGE_ACTIONS, WORKOUT_INPUT_ACTIONS,
-      PLAN_DAY_CLICK_ACTIONS, PLAN_DAY_CHANGE_ACTIONS,
+      PLAN_DAY_CLICK_ACTIONS,
+      EXERCISE_PICKER_ACTIONS, DROPMYO_ROW_ACTIONS, DROPMYO_ROW_INPUT_ACTIONS,
     };
   }
 
   async function init() {
-    populateMuscleSelect(document.getElementById('quick-ex-muscle'));
+    populateMuscleSelect(document.getElementById('picker-new-ex-muscle'));
     populateMuscleSelect(document.getElementById('new-ex-muscle'));
     // Settings load FIRST, before the exercise-catalog sync. That sync now
     // performs up to 92 record writes; if any one of them throws, init()
@@ -89,11 +89,9 @@
     // keystroke. Resize every one now that its real value is in place.
     document.querySelectorAll('textarea').forEach(autoGrowTextarea);
     await syncDefaultExercises();
-    await populateExerciseSelect();
     timerRemaining = await getSetting('restDefault', 90);
     timerTotal = timerRemaining;
     updateTimerDisplay();
-    renderEntryRows();
     await refreshLogAndHistory();
     selectedLogDayIdx = null; // fresh load — reset the Log tab's day pick
     await refreshPlanTab();
