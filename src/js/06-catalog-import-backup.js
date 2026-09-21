@@ -78,6 +78,10 @@
       const willDislike = !(pref && pref.disliked);
       await setExercisePref(exerciseId, { disliked: willDislike, liked: false, pinned: willDislike ? false : (pref ? pref.pinned : false) });
       await renderExerciseManager();
+      // The exercise picker filters out disliked exercises — either
+      // direction of this toggle changes that filtered set, same as a
+      // muscle reassignment does above.
+      invalidateExercisePicker();
     },
   };
 

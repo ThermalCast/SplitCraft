@@ -319,6 +319,46 @@ await fireAction('toggle-exercise', () => registries.WORKOUT_CLICK_ACTIONS['togg
   registries.WORKOUT_INPUT_ACTIONS['sync-sign'](input); // cosmetic, must not throw
 }
 
+// --- Add Exercise / extra-exercise cards (09-workout.js) -------------------
+{
+  await app.refreshActiveWorkoutSection();
+  const freshExercises = await app.getAllRecords('exercises');
+  const usedIds = new Set(day0.exercises.map(e => e.exerciseId));
+  usedIds.add(dayExId).add(otherExId);
+  const extra = freshExercises.find(e => !usedIds.has(e.id));
+
+  const addBtn = listeners.get('add-exercise-btn');
+  await fireAction('add-exercise-btn', () => addBtn.click({ target: {} }));
+  check('Add Exercise opened the picker with the right title',
+    app.document.getElementById('exercise-picker-title').textContent === 'Add an exercise');
+
+  await fireAction('pick-exercise (add exercise)', () => registries.EXERCISE_PICKER_ACTIONS['pick-exercise'](actionStub({ exid: String(extra.id) })));
+  let afterAdd = await app.getWorkoutForDate(today);
+  check('Add Exercise -> pick-exercise actually added the extra slot',
+    !!(afterAdd && afterAdd.extraExercises && afterAdd.extraExercises.some(e => e.exerciseId === extra.id)),
+    JSON.stringify(afterAdd && afterAdd.extraExercises));
+
+  await app.refreshActiveWorkoutSection();
+  const listHtml = app.document.getElementById('active-workout-list').innerHTML;
+  check('the added exercise renders as a card tagged "added today" with a Remove button',
+    listHtml.includes(extra.name) && listHtml.includes('added today') && listHtml.includes('data-action="remove-extra"'),
+    listHtml.includes(extra.name) ? 'name present' : 'name MISSING from render');
+
+  await fireAction('remove-extra', () => registries.WORKOUT_CLICK_ACTIONS['remove-extra'](actionStub({ exid: String(extra.id) })));
+  const afterRemove = await app.getWorkoutForDate(today);
+  check('remove-extra actually removed the slot (nothing was logged against it)',
+    !(afterRemove.extraExercises || []).some(e => e.exerciseId === extra.id),
+    JSON.stringify(afterRemove.extraExercises));
+}
+{
+  const group = actionStub({ exid: String(dayExId) });
+  await fireAction('open-drop-myo', () => registries.WORKOUT_CLICK_ACTIONS['open-drop-myo'](group));
+  check('open-drop-myo opened the drop/myo modal, titled with the exercise\'s own name',
+    app.document.getElementById('dropmyo-modal').hidden === false
+    && app.document.getElementById('dropmyo-modal-title').textContent.includes('Bench'),
+    app.document.getElementById('dropmyo-modal-title').textContent);
+}
+
 // --- PLAN_DAY_* (11-plan.js) ------------------------------------------------
 await app.refreshPlanTab();
 {

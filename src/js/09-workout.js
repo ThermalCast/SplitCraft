@@ -692,7 +692,7 @@
   // activeWorkoutCtx is always populated whenever this can actually fire.
   document.getElementById('add-exercise-btn').addEventListener('click', async () => {
     if (!activeWorkoutCtx) return;
-    const { day, allWorkouts, today } = activeWorkoutCtx;
+    const { plan, day, allWorkouts, today } = activeWorkoutCtx;
     const todayWorkout = allWorkouts.find(w => w.date === today) || null;
     const excludeIds = new Set(day.exercises.map(ex => ex.exerciseId));
     if (todayWorkout && todayWorkout.exerciseSwaps) {
@@ -701,13 +701,18 @@
     if (todayWorkout && todayWorkout.extraExercises) {
       todayWorkout.extraExercises.forEach(ex => excludeIds.add(ex.exerciseId));
     }
-    const repMin = Number(await getSetting('planRepMin', 0)) || 8;
-    const repMax = Number(await getSetting('planRepMax', 0)) || 12;
+    // "The normal set and rep range" means THIS plan's own — not whatever
+    // the Plan tab's form currently holds, which can drift from the active
+    // plan if it was edited without regenerating. Settings is only the
+    // fallback, for a plan record old enough to predate these fields.
+    const repMin = Number(plan.repRangeMin) || Number(await getSetting('planRepMin', 0)) || 8;
+    const repMax = Number(plan.repRangeMax) || Number(await getSetting('planRepMax', 0)) || 12;
+    const targetSets = Number(plan.fixedSets) || 3;
     await openExercisePicker({
       title: 'Add an exercise',
       excludeIds,
       onSelect: async (exerciseId) => {
-        await addExtraExercise(exerciseId, 3, repMin, repMax);
+        await addExtraExercise(exerciseId, targetSets, repMin, repMax);
         await refreshActiveWorkoutSection();
       }
     });

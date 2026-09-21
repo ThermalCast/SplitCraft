@@ -551,9 +551,13 @@ index from whatever plan came before it.
 
 **Add Exercise.** A single button below the active-workout list — no longer
 the old free-form "Log a set manually" form. Opens the exercise picker (see
-below); picking one appends it to `workout.extraExercises` (session-only,
-default `targetSets: 3` and the Settings plan rep range) via
-`addExtraExercise()`, and it renders as a normal card — suggestion, warm-up,
+below); picking one appends it to `workout.extraExercises` (session-only)
+via `addExtraExercise()`, defaulting to the CURRENT plan's own `fixedSets`
+(or 3) and `repRangeMin`/`repRangeMax` — "the normal set and rep range"
+means this plan's, not whatever the Plan tab's form currently holds, which
+can drift from the active plan if it was edited without regenerating;
+Settings' plan-rep-range fields are only the fallback, for a plan record
+old enough to predate these fields. It renders as a normal card — suggestion, warm-up,
 set rows — identically to a plan exercise, just tagged "added today" instead
 of showing a Swap button. Excludes exercises already on the day (plan slots,
 their session swaps, and anything already added) so picking twice can't

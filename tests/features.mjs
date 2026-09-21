@@ -1978,5 +1978,45 @@ check('clearSetting removes it from the cache',
   }
 }
 
+// ---------------------------------------------------------------------------
+// addExtraExercise / removeExtraExercise -- Add Exercise's storage layer.
+// Session-only slots on today's workout record, independent of any plan.
+// ---------------------------------------------------------------------------
+{
+  const cat = await app.getAllRecords('exercises');
+  const bench = cat.find(e => e.name === 'Barbell Bench Press');
+  const row = cat.find(e => e.name === 'Barbell Row');
+
+  await app.clearStore('workouts');
+  await app.addExtraExercise(bench.id, 4, 6, 10);
+  let w = await app.getWorkoutForDate(app.todayStr());
+  check('addExtraExercise creates a workout record with the extra slot',
+    !!w && Array.isArray(w.extraExercises) && w.extraExercises.length === 1
+    && w.extraExercises[0].exerciseId === bench.id && w.extraExercises[0].targetSets === 4
+    && w.extraExercises[0].repRangeMin === 6 && w.extraExercises[0].repRangeMax === 10,
+    JSON.stringify(w && w.extraExercises));
+
+  await app.addExtraExercise(bench.id, 3, 8, 12);
+  w = await app.getWorkoutForDate(app.todayStr());
+  check('adding the same exercise again does not create a second slot (or overwrite the first)',
+    w.extraExercises.length === 1 && w.extraExercises[0].targetSets === 4,
+    JSON.stringify(w.extraExercises));
+
+  await app.removeExtraExercise(bench.id);
+  w = await app.getWorkoutForDate(app.todayStr());
+  check('removeExtraExercise removes the slot when nothing has been logged against it',
+    w.extraExercises.length === 0, JSON.stringify(w.extraExercises));
+
+  await app.addExtraExercise(row.id, 3, 8, 12);
+  await app.logSet(row.id, 'standard', [{ weight: 40, reps: 8 }], null);
+  await app.removeExtraExercise(row.id);
+  w = await app.getWorkoutForDate(app.todayStr());
+  check('removeExtraExercise refuses once a set has been logged against the slot',
+    w.extraExercises.length === 1 && w.extraExercises[0].exerciseId === row.id,
+    JSON.stringify(w.extraExercises));
+
+  await app.clearStore('workouts');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exitCode = failed ? 1 : 0;
