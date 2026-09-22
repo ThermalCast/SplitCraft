@@ -342,6 +342,11 @@
     box-shadow: 0 0 0 3px var(--accent-soft);
   }
   .field input[type="file"] { padding: 9px 11px; font-size: 13.5px; color: var(--text-dim); }
+  /* Safari's native date-input segments (MM/DD/YYYY + calendar icon) carry
+     their own intrinsic minimum width that `width: 100%` alone doesn't
+     override, so on a narrow phone screen the field can overflow its
+     panel — min-width: 0 is what actually lets it shrink to fit. */
+  .field input[type="date"] { min-width: 0; max-width: 100%; }
   select {
     appearance: none; -webkit-appearance: none;
     background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath fill='%23929aa4' d='M1 1.5 6 6.5l5-5'/%3E%3C/svg%3E");
