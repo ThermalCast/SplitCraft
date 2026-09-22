@@ -82,6 +82,7 @@
   async function init() {
     populateMuscleSelect(document.getElementById('picker-new-ex-muscle'));
     populateMuscleSelect(document.getElementById('new-ex-muscle'));
+    populateBirthdayYearSelect();
     // Settings load FIRST, before the exercise-catalog sync. That sync now
     // performs up to 92 record writes; if any one of them throws, init()
     // unwinds and everything after it never runs. With the old ordering that

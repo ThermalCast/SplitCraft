@@ -970,8 +970,28 @@ only falls back to the plain `age` setting when no birthday is on file, and
 the Settings UI disables the numeric Age field and auto-fills it with the
 derived value the moment a birthday is entered (`refreshAgeFromBirthday()`,
 07-settings.js), rather than leaving a manual value sitting there that would
-silently stop mattering. Clearing the birthday field re-enables manual entry
+silently stop mattering. Clearing the birthday re-enables manual entry
 exactly as it worked before this existed.
+
+**Entered as three plain `<select>`s (month/day/year), not
+`<input type="date">`.** The native date picker was the first version of
+this, and it had a real, Safari-specific bug: the control's internal
+month/day/year segments carry their own intrinsic width that no CSS
+override (`width: 100%`, `min-width: 0`, `max-width: 100%` were all tried)
+reliably brought back under the Settings panel's width — a long-standing,
+inconsistently-fixable WebKit rendering quirk, not a mistake in this app's
+CSS. Three ordinary selects sidestep it entirely, at the cost of losing the
+native picker UI; `readBirthdaySelects()` (07-settings.js) combines them
+into the same `'YYYY-MM-DD'` string only once all three hold a real value —
+any one left on its blank option is exactly the "no birthday set" state
+`ageFromBirthday()` already treats an empty string as, so clearing any
+single select (not just the year) is how "clear the birthday" works, with
+no separate clear button to wire. The year select's option list is built
+once at init (`populateBirthdayYearSelect()`) from 1900 up to 5 years ago —
+deliberately wider than the plain Age field's own 12–100 plausible-age
+spinner bounds, since the *old* date-input version had no such bound and an
+existing stored birthday outside a narrower range would otherwise land on
+no matching `<option>` and silently render blank instead of the real value.
 
 **Bodyweight follows the canonical-kg rule like every other weight**: stored
 as `bodyweightKg`, entered and displayed in whatever `weightUnit` is set,

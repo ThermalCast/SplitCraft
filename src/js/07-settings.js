@@ -126,11 +126,45 @@
       hint.textContent = 'Applies a small taper to the progression rate past 40 — a judgment call, not a number lifted from a study.';
     }
   }
-  document.getElementById('setting-birthday').addEventListener('change', async (e) => {
-    await setSetting('birthday', e.target.value);
+  // Three plain selects (month/day/year), not <input type="date"> — see the
+  // markup comment in page.html for why. Combined into one 'YYYY-MM-DD'
+  // string only once all three have a real value; any one left on its
+  // blank option is exactly the "no birthday set" state
+  // ageFromBirthday()/currentAge() already treat an empty string as, so
+  // clearing any single select is how "clear the birthday" works now —
+  // there's no separate clear button to wire.
+  function readBirthdaySelects() {
+    const m = document.getElementById('setting-birthday-month').value;
+    const d = document.getElementById('setting-birthday-day').value;
+    const y = document.getElementById('setting-birthday-year').value;
+    return (m && d && y) ? `${y}-${m}-${d}` : '';
+  }
+  async function onBirthdaySelectChange() {
+    await setSetting('birthday', readBirthdaySelects());
     await refreshAgeFromBirthday();
     await afterProfileSettingChange();
-  });
+  }
+  document.getElementById('setting-birthday-month').addEventListener('change', onBirthdaySelectChange);
+  document.getElementById('setting-birthday-day').addEventListener('change', onBirthdaySelectChange);
+  document.getElementById('setting-birthday-year').addEventListener('change', onBirthdaySelectChange);
+
+  // The year select's options depend on "today", so it's built once here
+  // rather than hardcoded in page.html the way the fixed month/day lists
+  // are. Deliberately wider than setting-age's 12-100 plausible-age
+  // spinner bounds (1900 up to 5 years ago) — the OLD <input type="date">
+  // this replaced had no such bound, so an existing stored birthday could
+  // fall outside a narrower range; a year with no matching <option> would
+  // silently show as blank instead of the real stored value. Idempotent
+  // (innerHTML rebuild, same pattern as populateMuscleSelect()) — called
+  // once from init(), before loadSettingsIntoForm() ever sets a value on it.
+  function populateBirthdayYearSelect() {
+    const sel = document.getElementById('setting-birthday-year');
+    if (!sel) return;
+    const thisYear = Number(todayStr().slice(0, 4));
+    const years = [];
+    for (let y = thisYear - 5; y >= 1900; y--) years.push(y);
+    sel.innerHTML = '<option value="">Year</option>' + years.map(y => `<option value="${y}">${y}</option>`).join('');
+  }
   document.getElementById('setting-bodyweight').addEventListener('change', async (e) => {
     bodyweightKg = toKg(Number(e.target.value) || 0);
     await setSetting('bodyweightKg', bodyweightKg);
@@ -622,7 +656,11 @@
     document.getElementById('setting-sex').value = await getSetting('sex', 'unspecified');
     const storedAge = await getSetting('age', 0);
     document.getElementById('setting-age').value = storedAge || '';
-    document.getElementById('setting-birthday').value = await getSetting('birthday', '');
+    const storedBirthday = await getSetting('birthday', '');
+    const [by, bm, bd] = storedBirthday ? storedBirthday.split('-') : ['', '', ''];
+    document.getElementById('setting-birthday-year').value = by;
+    document.getElementById('setting-birthday-month').value = bm;
+    document.getElementById('setting-birthday-day').value = bd;
     await refreshAgeFromBirthday();
     document.getElementById('setting-energy').value = await getSetting('energyBalance', 'maintenance');
     bodyweightKg = await getSetting('bodyweightKg', 0);

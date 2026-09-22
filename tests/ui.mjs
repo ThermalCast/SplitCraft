@@ -648,10 +648,20 @@ await app.refreshPlanTab();
 }
 
 // --- Birthday-derived age (07-settings.js's refreshAgeFromBirthday) --------
+// Three plain selects (month/day/year), not <input type="date"> -- see the
+// markup comment in page.html for why (a Safari-only overflow that no CSS
+// override reliably fixed).
 {
   const ageInput = app.document.getElementById('setting-age');
-  const birthdayInput = app.document.getElementById('setting-birthday');
-  const birthdayListener = listeners.get('setting-birthday');
+  const monthSel = app.document.getElementById('setting-birthday-month');
+  const daySel = app.document.getElementById('setting-birthday-day');
+  const yearSel = app.document.getElementById('setting-birthday-year');
+  const monthListener = listeners.get('setting-birthday-month');
+  const dayListener = listeners.get('setting-birthday-day');
+  const yearListener = listeners.get('setting-birthday-year');
+
+  check('the year select was populated at init (not left as just the blank option)',
+    yearSel.innerHTML.includes('<option value="2000">2000</option>'), yearSel.innerHTML.length);
 
   await app.clearSetting('birthday');
   await app.setSetting('age', 50);
@@ -660,18 +670,36 @@ await app.refreshPlanTab();
     ageInput.disabled === false && ageInput.value === 50, `disabled=${ageInput.disabled} value=${ageInput.value}`);
 
   const today = app.todayStr();
-  const twentyFiveYearsAgo = `${Number(today.slice(0, 4)) - 25}${today.slice(4)}`;
-  birthdayInput.value = twentyFiveYearsAgo;
-  await fireAction('setting-birthday change', () => birthdayListener.change({ target: birthdayInput }));
-  check('setting a birthday disables the Age field and auto-fills the derived value',
+  const twentyFiveYearsAgo = today.slice(0, 4) - 25;
+  // Only the LAST of the three selects to be set actually completes a
+  // valid 'YYYY-MM-DD' -- readBirthdaySelects() requires all three, so
+  // setting month/day first (with year still blank) must be a no-op, and
+  // only the third change event should actually derive an age.
+  monthSel.value = today.slice(5, 7);
+  await fireAction('setting-birthday-month change (incomplete)', () => monthListener.change({ target: monthSel }));
+  check('a birthday with only month set is NOT treated as complete',
+    ageInput.disabled === false);
+  daySel.value = today.slice(8, 10);
+  await fireAction('setting-birthday-day change (incomplete)', () => dayListener.change({ target: daySel }));
+  check('a birthday with month+day but no year is STILL not treated as complete',
+    ageInput.disabled === false);
+  yearSel.value = String(twentyFiveYearsAgo);
+  await fireAction('setting-birthday-year change (completes it)', () => yearListener.change({ target: yearSel }));
+  check('completing all three selects disables the Age field and auto-fills the derived value',
     ageInput.disabled === true && ageInput.value === 25,
     `disabled=${ageInput.disabled} value=${ageInput.value}`);
+  check('the combined birthday was actually saved as YYYY-MM-DD',
+    (await app.getSetting('birthday', '')) === `${twentyFiveYearsAgo}-${today.slice(5, 7)}-${today.slice(8, 10)}`);
 
-  birthdayInput.value = '';
-  await fireAction('setting-birthday change (cleared)', () => birthdayListener.change({ target: birthdayInput }));
-  check('clearing the birthday re-enables manual age entry', ageInput.disabled === false);
+  // Clearing any ONE of the three back to blank is how "clear the
+  // birthday" works now -- there's no separate clear button.
+  yearSel.value = '';
+  await fireAction('setting-birthday-year change (cleared)', () => yearListener.change({ target: yearSel }));
+  check('clearing just the year re-enables manual age entry', ageInput.disabled === false);
   check('clearing the birthday restores the field to the STORED age, not the stale derived one',
     ageInput.value === 50, `value=${ageInput.value}`);
+  check('clearing the birthday actually saved it back to empty',
+    (await app.getSetting('birthday', 'not empty')) === '');
 
   await app.clearSetting('birthday');
   await app.clearSetting('age');

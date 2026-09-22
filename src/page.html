@@ -346,7 +346,8 @@
      their own intrinsic minimum width that `width: 100%` alone doesn't
      override, so on a narrow phone screen the field can overflow its
      panel — min-width: 0 is what actually lets it shrink to fit. */
-  .field input[type="date"] { min-width: 0; max-width: 100%; }
+  .birthday-selects { display: flex; gap: 8px; }
+  .birthday-selects select { flex: 1 1 0; min-width: 0; }
   select {
     appearance: none; -webkit-appearance: none;
     background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath fill='%23929aa4' d='M1 1.5 6 6.5l5-5'/%3E%3C/svg%3E");
@@ -1326,9 +1327,41 @@
         </div>
       </div>
       <div class="field">
-        <label for="setting-birthday">Birthday (optional)</label>
-        <input type="date" id="setting-birthday">
-        <div class="hint">Set once and your age below stays current automatically — no more remembering to bump it every year. Clear it to type an age by hand instead.</div>
+        <label for="setting-birthday-month">Birthday (optional)</label>
+        <!-- Three plain selects rather than <input type="date"> -- Safari's
+             native date-input segments carry their own intrinsic width that
+             no reliable CSS override brings back under the panel's width,
+             while a plain <select> (see Sex, just above) already renders
+             correctly at every screen size. -->
+        <div class="birthday-selects">
+          <select id="setting-birthday-month" aria-label="Birth month">
+            <option value="">Month</option>
+            <option value="01">Jan</option><option value="02">Feb</option>
+            <option value="03">Mar</option><option value="04">Apr</option>
+            <option value="05">May</option><option value="06">Jun</option>
+            <option value="07">Jul</option><option value="08">Aug</option>
+            <option value="09">Sep</option><option value="10">Oct</option>
+            <option value="11">Nov</option><option value="12">Dec</option>
+          </select>
+          <select id="setting-birthday-day" aria-label="Birth day">
+            <option value="">Day</option>
+            <option value="01">1</option><option value="02">2</option><option value="03">3</option>
+            <option value="04">4</option><option value="05">5</option><option value="06">6</option>
+            <option value="07">7</option><option value="08">8</option><option value="09">9</option>
+            <option value="10">10</option><option value="11">11</option><option value="12">12</option>
+            <option value="13">13</option><option value="14">14</option><option value="15">15</option>
+            <option value="16">16</option><option value="17">17</option><option value="18">18</option>
+            <option value="19">19</option><option value="20">20</option><option value="21">21</option>
+            <option value="22">22</option><option value="23">23</option><option value="24">24</option>
+            <option value="25">25</option><option value="26">26</option><option value="27">27</option>
+            <option value="28">28</option><option value="29">29</option><option value="30">30</option>
+            <option value="31">31</option>
+          </select>
+          <select id="setting-birthday-year" aria-label="Birth year">
+            <option value="">Year</option>
+          </select>
+        </div>
+        <div class="hint">Set once and your age below stays current automatically — no more remembering to bump it every year. Clear any one back to its blank option to type an age by hand instead.</div>
       </div>
       <div class="field">
         <label for="setting-age">Age (optional)</label>
