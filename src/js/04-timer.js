@@ -256,6 +256,13 @@
     const startBtn = document.getElementById('session-start-btn');
     const startHint = document.getElementById('session-start-hint');
     const completeBtn = document.getElementById('session-complete-btn');
+    // Absent (not disabled) with nothing configured -- same convention the
+    // Share Backup button uses for its own feature detection. Independent of
+    // session state: worth offering whether or not today's session (or its
+    // own auto-start) has already fired, in case that setting is off or the
+    // first attempt didn't land.
+    const fitnessBtn = document.getElementById('apple-fitness-btn');
+    fitnessBtn.style.display = (await getSetting('appleFitnessShortcutName', '')).trim() ? 'block' : 'none';
 
     display.classList.remove('idle', 'running');
     if (!workout || !workout.startedAt) {
@@ -284,8 +291,12 @@
   }
 
   document.getElementById('session-start-btn').addEventListener('click', async () => {
-    await startWorkoutSession();
+    const workout = await startWorkoutSession();
     await refreshSessionCard();
+    await maybeAutoStartAppleFitness(workout);
+  });
+  document.getElementById('apple-fitness-btn').addEventListener('click', async () => {
+    await triggerAppleFitnessWorkout();
   });
   document.getElementById('session-complete-btn').addEventListener('click', async () => {
     await completeWorkoutSession();

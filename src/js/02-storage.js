@@ -555,12 +555,21 @@
     // stamps a session that has no start yet — pressing Start later keeps
     // this earlier time (startWorkoutSessionLocked already guards on
     // `!workout.startedAt`).
-    if (!workout.startedAt) {
+    // `sessionJustStarted` is attached to the RETURNED object only, after the
+    // write — never persisted — so a caller can tell "this call is the one
+    // that started today's session" from "the session was already running"
+    // without a second read. Used by the Apple Fitness auto-start hook (see
+    // "Apple Fitness" under Set logging UX in design-summary.md) to fire the
+    // Shortcuts deep link exactly once a day, off whichever of Start Warm-up
+    // or the first logged set gets there first — the same event
+    // startedAt/startedAuto already exist to capture.
+    const sessionJustStarted = !workout.startedAt;
+    if (sessionJustStarted) {
       workout.startedAt = ts;
       workout.startedAuto = true;
     }
     await putRecord('workouts', workout);
-    return workout;
+    return { ...workout, sessionJustStarted };
   }
 
   // Returns the removed set (so a caller can offer an Undo), or `null` if
@@ -711,11 +720,14 @@
     const date = todayStr();
     let workout = await getWorkoutForDate(date);
     if (!workout) workout = { date, ts: Date.now(), planId: null, dayIndex: null, dayName: null, exercises: [] };
-    if (!workout.startedAt) workout.startedAt = Date.now();
+    // See the matching comment in logSetLocked() -- same transient,
+    // never-persisted flag, same reason.
+    const sessionJustStarted = !workout.startedAt;
+    if (sessionJustStarted) workout.startedAt = Date.now();
     workout.endedAt = null;
     workout.durationMs = null;
     await putRecord('workouts', workout);
-    return workout;
+    return { ...workout, sessionJustStarted };
   }
 
   async function completeWorkoutSession() {

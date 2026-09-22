@@ -64,6 +64,17 @@
     await setSetting('rirPromptEnabled', rirOn);
     if (!rirOn) hideRirPrompt();
   });
+  document.getElementById('setting-supersets-enabled').addEventListener('change', async (e) => {
+    await setSetting('supersetsEnabled', e.target.checked);
+    await refreshLogAndHistory();
+  });
+  document.getElementById('setting-apple-fitness-shortcut').addEventListener('change', async (e) => {
+    await setSetting('appleFitnessShortcutName', e.target.value.trim());
+    await refreshSessionCard();
+  });
+  document.getElementById('setting-apple-fitness-auto').addEventListener('change', async (e) => {
+    await setSetting('appleFitnessAutoStart', e.target.checked);
+  });
   document.getElementById('setting-seconds-per-set').addEventListener('change', async (e) => {
     await setSetting('secondsPerSet', Number(e.target.value) || 0);
     await afterProgressionSettingChange();
@@ -90,6 +101,34 @@
   });
   document.getElementById('setting-age').addEventListener('change', async (e) => {
     await setSetting('age', Number(e.target.value) || 0);
+    await afterProfileSettingChange();
+  });
+  // Once a birthday is given it's authoritative — see currentAge()
+  // (08-progression.js) for why — so the plain age field becomes a
+  // disabled, auto-filled display of the derived value rather than
+  // something that would silently be overridden the next time it's read.
+  async function refreshAgeFromBirthday() {
+    const ageInput = document.getElementById('setting-age');
+    const hint = document.getElementById('age-field-hint');
+    const birthday = await getSetting('birthday', '');
+    const derived = birthday ? ageFromBirthday(birthday, todayStr()) : null;
+    if (derived != null) {
+      ageInput.value = derived;
+      ageInput.disabled = true;
+      hint.textContent = `Derived from your birthday above (currently ${derived}) — clear the birthday field to type an age by hand instead.`;
+    } else {
+      // Restore the field to whatever's actually stored, not whatever it
+      // was last showing — clearing the birthday must not leave the
+      // now-inert derived number sitting there looking current.
+      const storedAge = await getSetting('age', 0);
+      ageInput.value = storedAge || '';
+      ageInput.disabled = false;
+      hint.textContent = 'Applies a small taper to the progression rate past 40 — a judgment call, not a number lifted from a study.';
+    }
+  }
+  document.getElementById('setting-birthday').addEventListener('change', async (e) => {
+    await setSetting('birthday', e.target.value);
+    await refreshAgeFromBirthday();
     await afterProfileSettingChange();
   });
   document.getElementById('setting-bodyweight').addEventListener('change', async (e) => {
@@ -569,6 +608,9 @@
     document.getElementById('setting-rest').value = await getSetting('restDefault', 90);
     document.getElementById('setting-rest-enabled').checked = await getSetting('restTimerEnabled', true);
     document.getElementById('setting-rir-prompt').checked = await getSetting('rirPromptEnabled', true);
+    document.getElementById('setting-supersets-enabled').checked = await getSetting('supersetsEnabled', true);
+    document.getElementById('setting-apple-fitness-shortcut').value = await getSetting('appleFitnessShortcutName', '');
+    document.getElementById('setting-apple-fitness-auto').checked = await getSetting('appleFitnessAutoStart', false);
     const storedPace = await getSetting('secondsPerSet', 0);
     document.getElementById('setting-seconds-per-set').value = storedPace || '';
     document.getElementById('setting-gym-type').value = await getSetting('gymType', 'commercial');
@@ -580,6 +622,8 @@
     document.getElementById('setting-sex').value = await getSetting('sex', 'unspecified');
     const storedAge = await getSetting('age', 0);
     document.getElementById('setting-age').value = storedAge || '';
+    document.getElementById('setting-birthday').value = await getSetting('birthday', '');
+    await refreshAgeFromBirthday();
     document.getElementById('setting-energy').value = await getSetting('energyBalance', 'maintenance');
     bodyweightKg = await getSetting('bodyweightKg', 0);
     document.getElementById('setting-plan-days').value = await getSetting('planDaysPerWeek', 4);

@@ -17,6 +17,18 @@
   async function syncDefaultExercises() {
     const existing = await getAllRecords('exercises');
     const existingByName = new Map(existing.map(e => [nameKey(e.name), e]));
+    // perSide is only ever auto-applied to an exercise with NO logged
+    // history yet. For one that's already been trained, there is no way to
+    // tell from the stored data alone whether its past sets were hand-typed
+    // (which would need doubling) or came from a CSV import (whose
+    // multiplier column already produced the true total — see "Per-side
+    // weight" in design-summary.md): retroactively flipping the flag on a
+    // used exercise risks silently doubling real, already-correct history.
+    // An exercise with history keeps whatever perSide it already has —
+    // absent, same as today — until confirmed by hand on the Exercises tab.
+    const workouts = await getAllWorkouts();
+    const loggedExerciseIds = new Set();
+    for (const w of workouts) for (const ex of w.exercises) if (ex.sets.length > 0) loggedExerciseIds.add(ex.exerciseId);
     for (const def of DEFAULT_EXERCISES) {
       const key = nameKey(def.name);
       const current = existingByName.get(key);
@@ -38,11 +50,13 @@
       // control that reports success and then reverts is worse than one that
       // isn't offered, because the user has no reason to check.
       if (current.custom || current.userEdited) continue;
+      const targetPerSide = loggedExerciseIds.has(current.id) ? !!current.perSide : !!def.perSide;
       const outOfDate = current.primaryMuscle !== def.primaryMuscle
         || current.equipment !== equipment
-        || JSON.stringify(current.secondaryMuscles) !== JSON.stringify(def.secondaryMuscles);
+        || JSON.stringify(current.secondaryMuscles) !== JSON.stringify(def.secondaryMuscles)
+        || !!current.perSide !== targetPerSide;
       if (outOfDate) {
-        await putRecord('exercises', { ...current, primaryMuscle: def.primaryMuscle, secondaryMuscles: def.secondaryMuscles, equipment, custom: false });
+        await putRecord('exercises', { ...current, primaryMuscle: def.primaryMuscle, secondaryMuscles: def.secondaryMuscles, equipment, perSide: targetPerSide, custom: false });
       }
     }
   }
@@ -60,7 +74,7 @@
       HISTORY_CLICK_ACTIONS, HISTORY_CHANGE_ACTIONS, HISTORY_INPUT_ACTIONS, PROGRESS_CHART_ACTIONS,
       EXERCISE_MANAGER_CLICK_ACTIONS, EXERCISE_MANAGER_CHANGE_ACTIONS,
       WORKOUT_CLICK_ACTIONS, WORKOUT_CHANGE_ACTIONS, WORKOUT_INPUT_ACTIONS,
-      PLAN_DAY_CLICK_ACTIONS,
+      PLAN_DAY_CLICK_ACTIONS, PLAN_DAY_CHANGE_ACTIONS, PLAN_HISTORY_ACTIONS,
       EXERCISE_PICKER_ACTIONS, DROPMYO_ROW_ACTIONS, DROPMYO_ROW_INPUT_ACTIONS,
     };
   }

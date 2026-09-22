@@ -64,23 +64,33 @@
     { id: 'other', name: 'Other / free', defaultStepKg: 2.5 }
   ];
 
+  // `perSide: true` marks an exercise as genuinely two implements moving
+  // together (both dumbbells pressed/curled/shrugged at once) — see
+  // "Per-side weight" in design-summary.md. Curated by hand per entry here,
+  // the same way primaryMuscle/secondaryMuscles are, rather than guessed
+  // from the name: "dumbbell" alone doesn't say it (Goblet Squat is one
+  // implement; Dumbbell Row is conventionally one arm at a time), and a
+  // confidently wrong guess would silently double someone's real progression
+  // numbers. Absent (the default) means "log the true total load," today's
+  // unchanged behavior — only entries below that are unambiguously bilateral
+  // get it.
   const DEFAULT_EXERCISES = [
     // ---- Chest ----
     { name: 'Barbell Bench Press', primaryMuscle: 'chest', secondaryMuscles: ['triceps', 'front_delts'] },
-    { name: 'Dumbbell Bench Press', primaryMuscle: 'chest', secondaryMuscles: ['triceps', 'front_delts'] },
+    { name: 'Dumbbell Bench Press', primaryMuscle: 'chest', secondaryMuscles: ['triceps', 'front_delts'], perSide: true },
     { name: 'Incline Barbell Bench Press', primaryMuscle: 'chest', secondaryMuscles: ['front_delts', 'triceps'] },
-    { name: 'Incline Dumbbell Press', primaryMuscle: 'chest', secondaryMuscles: ['front_delts', 'triceps'] },
+    { name: 'Incline Dumbbell Press', primaryMuscle: 'chest', secondaryMuscles: ['front_delts', 'triceps'], perSide: true },
     { name: 'Machine Chest Press', primaryMuscle: 'chest', secondaryMuscles: ['triceps', 'front_delts'] },
     { name: 'Dips', primaryMuscle: 'chest', secondaryMuscles: ['triceps'] },
     { name: 'Assisted Dip', primaryMuscle: 'chest', secondaryMuscles: ['triceps'] },
     { name: 'Push-Up', primaryMuscle: 'chest', secondaryMuscles: ['triceps', 'front_delts'] },
     { name: 'Cable Fly', primaryMuscle: 'chest', secondaryMuscles: [] },
-    { name: 'Dumbbell Fly', primaryMuscle: 'chest', secondaryMuscles: [] },
+    { name: 'Dumbbell Fly', primaryMuscle: 'chest', secondaryMuscles: [], perSide: true },
     { name: 'Pec Deck', primaryMuscle: 'chest', secondaryMuscles: [] },
 
     // ---- Front delts ----
     { name: 'Overhead Press', primaryMuscle: 'front_delts', secondaryMuscles: ['triceps'] },
-    { name: 'Dumbbell Shoulder Press', primaryMuscle: 'front_delts', secondaryMuscles: ['triceps'] },
+    { name: 'Dumbbell Shoulder Press', primaryMuscle: 'front_delts', secondaryMuscles: ['triceps'], perSide: true },
     { name: 'Machine Shoulder Press', primaryMuscle: 'front_delts', secondaryMuscles: ['triceps'] },
     { name: 'Arnold Press', primaryMuscle: 'front_delts', secondaryMuscles: ['side_delts', 'triceps'] },
     { name: 'Front Raise', primaryMuscle: 'front_delts', secondaryMuscles: [] },
@@ -121,21 +131,21 @@
 
     // ---- Upper back / traps ----
     { name: 'Shrug', primaryMuscle: 'upper_back', secondaryMuscles: ['forearms'] },
-    { name: 'Dumbbell Shrug', primaryMuscle: 'upper_back', secondaryMuscles: ['forearms'] },
+    { name: 'Dumbbell Shrug', primaryMuscle: 'upper_back', secondaryMuscles: ['forearms'], perSide: true },
     { name: 'Rack Pull', primaryMuscle: 'upper_back', secondaryMuscles: ['lats', 'lower_back'] },
 
     // ---- Biceps ----
     { name: 'Barbell Curl', primaryMuscle: 'biceps', secondaryMuscles: ['forearms'] },
-    { name: 'Dumbbell Curl', primaryMuscle: 'biceps', secondaryMuscles: ['forearms'] },
-    { name: 'Hammer Curl', primaryMuscle: 'biceps', secondaryMuscles: ['forearms'] },
+    { name: 'Dumbbell Curl', primaryMuscle: 'biceps', secondaryMuscles: ['forearms'], perSide: true },
+    { name: 'Hammer Curl', primaryMuscle: 'biceps', secondaryMuscles: ['forearms'], perSide: true },
     { name: 'Preacher Curl', primaryMuscle: 'biceps', secondaryMuscles: [] },
-    { name: 'Incline Dumbbell Curl', primaryMuscle: 'biceps', secondaryMuscles: [] },
+    { name: 'Incline Dumbbell Curl', primaryMuscle: 'biceps', secondaryMuscles: [], perSide: true },
     { name: 'Cable Curl', primaryMuscle: 'biceps', secondaryMuscles: ['forearms'] },
 
     // ---- Forearms ----
     { name: 'Wrist Curl', primaryMuscle: 'forearms', secondaryMuscles: [] },
     { name: 'Reverse Curl', primaryMuscle: 'forearms', secondaryMuscles: ['biceps'] },
-    { name: 'Farmers Walk', primaryMuscle: 'forearms', secondaryMuscles: ['upper_back'] },
+    { name: 'Farmers Walk', primaryMuscle: 'forearms', secondaryMuscles: ['upper_back'], perSide: true },
 
     // ---- Quads ----
     { name: 'Back Squat', primaryMuscle: 'quads', secondaryMuscles: ['glutes'] },

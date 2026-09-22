@@ -118,6 +118,10 @@ calendar day trained:
   new); never touched by the sync.
 - `userEdited` — set when the muscle or equipment dropdown in Settings is
   used on a row. Stops the catalog sync from managing it thereafter.
+- `perSide` — `true` when a logged weight is one implement's load, not the
+  real total (a dumbbell in each hand, moved together); see "Per-side
+  weight" below. Absent/`false` means the stored number already is the true
+  total — today's behavior, unchanged.
 - `startingWeightKg` / `startingWeightSource` — an opening weight for a lift
   with no history, written by the AI pass after plan generation.
   Self-expiring: once the lift has a logged set, the progression path takes
@@ -131,7 +135,9 @@ pinned/liked/disliked.
 
 **`plans`** (keyPath `id` autoIncrement)
 - `createdAt`, `goal`, `daysPerWeek`, `equipment`, `notes`
-- `days` — `[{name, exercises: [{exerciseId, name, targetSets, repRangeMin, repRangeMax}]}]`
+- `days` — `[{name, exercises: [{exerciseId, name, targetSets, repRangeMin, repRangeMax, pairedExerciseId?}]}]`
+  — `pairedExerciseId` is optional, absent unless the exercise is superset with
+  another one in the same day; see "Supersets (paired exercises)" below.
 - `daysPerWeek` here is a snapshot of the global setting at generation time
   (display only); the live weekly-progress countdown reads the *current*
   global setting instead.
@@ -153,12 +159,14 @@ value — the mirror is consulted only once, at load, never per read:
 
 - **OpenRouter** — `openrouterKey`, `openrouterModel`
 - **Workout** — `restDefault` (seconds), `restTimerEnabled`,
-  `rirPromptEnabled`, `equipmentStepsKg`
+  `rirPromptEnabled`, `equipmentStepsKg`, `appleFitnessShortcutName`,
+  `appleFitnessAutoStart`, `supersetsEnabled`
 - **Time model** — `secondsPerSet`, `exerciseSetupSeconds`, `gymType`
   (`commercial` | `home_combo` | `home_dedicated`), `sessionMinutes`
-- **Profile** — `experienceLevel`, `sex`, `age`, `bodyweightKg`,
+- **Profile** — `experienceLevel`, `sex`, `age`, `birthday`, `bodyweightKg`,
   `energyBalance`
-- **Training** — `planDaysPerWeek`, `planSplitType`, `planSplitCustom`
+- **Training** — `planDaysPerWeek`, `planSplitType`, `planSplitCustom`,
+  `activePlanId`
 - **Plan form (remembered between generations)** — `planGoal`,
   `planEquipment`, `planNotes`, `planRepMin`, `planRepMax`, `planFixedSets`
 - **Plan scheduling** — `planWeekDismissed` (the week-start a regeneration
@@ -167,11 +175,11 @@ value — the mirror is consulted only once, at load, never per read:
 - **Backup** — `lastBackupAt` (epoch ms of the last export/share/Dropbox
   upload that actually completed; feeds the "Last backup" reminder in
   Settings), `dropboxRefreshToken` (present only once Dropbox is connected —
-  see "Cloud backup: Dropbox" below)
+  see "Cloud backup: Dropbox" in Part 2)
 
 `openrouterKey`, `lastBackupAt`, and `dropboxRefreshToken` are all
 **excluded from backups**, each for its own reason — see "Backup & restore"
-and "Cloud backup: Dropbox".
+below and "Cloud backup: Dropbox" in Part 2.
 
 ### Upgrade path
 
@@ -483,6 +491,49 @@ does not touch, and excluding them would have thrown away most of the
 history the model most needs — precisely the sessions where Start was
 forgotten.
 
+### Apple Fitness (Shortcuts deep link)
+
+Safari has no API access to HealthKit or the Fitness app — that door simply
+isn't open to web content, installed or not, unlike a native app. The one
+bridge available is Apple's own Shortcuts app: a Shortcut built once, holding
+a single "Start Workout" action set to Traditional Strength Training, can be
+launched by name from any page via the `shortcuts://run-shortcut?name=<name>`
+URL scheme. `appleFitnessShortcutName` (Settings → Workout) holds that name;
+blank by default, and blank means the whole feature is off — no button, no
+auto-start, nothing to configure further.
+
+**`triggerAppleFitnessWorkout()`** (03-helpers.js) is the one place that
+knows how to fire it: reads the setting and does nothing if it's blank,
+otherwise sets `location.href` to the deep link. Deliberately
+one-directional — SplitCraft has no way to know whether the Shortcut ran,
+whether it started the intended workout type, or whether a Watch was even
+reachable; it can only ever fire-and-forget the URL.
+
+- **Manual**: a "Start Apple Fitness" button sits next to Start Warm-up in
+  the session card, absent (not disabled) unless a shortcut name is
+  configured — the same feature-detection convention the Share Backup button
+  uses. Available regardless of session state, so it still works if
+  auto-start is off, or a first attempt didn't land.
+- **Automatic** (`appleFitnessAutoStart`, off by default): fires once, the
+  first time TODAY'S session actually starts — whichever of Start Warm-up or
+  the first logged set gets there first, the same "whichever comes first
+  wins" moment `startedAt`/`startedAuto` already exist to capture (see above).
+  `logSetLocked()` and `startWorkoutSessionLocked()` (02-storage.js) both
+  attach a transient `sessionJustStarted` flag to the workout object they
+  return — true only on the one call that actually stamps `startedAt`, never
+  again once the day's session is already running — and it's never written
+  to the store, only attached to the returned object after the write.
+  **`maybeAutoStartAppleFitness(workout)`** (03-helpers.js) is the single
+  gate every call site goes through: a no-op unless both the flag is set and
+  the setting is on. The three UI call sites that can start a session — the
+  Start button (04-timer.js), the plan-driven Log button, and the drop/myo
+  modal's Log button (both 09-workout.js) — each call it with the workout
+  object logSet()/startWorkoutSession() just returned, after their own
+  refresh/rest-timer/RIR work, so the resulting app-switch away from Safari
+  interrupts nothing already in flight.
+- Pressing Start again later the same day, or logging further sets, never
+  re-fires it — same one-shot-per-day shape as `startedAt` itself.
+
 ### Active workout (logging against a plan)
 
 Once a plan exists, the workout tab's active-workout section — day-picker
@@ -600,6 +651,73 @@ opening an inline panel of previous sessions (date, days-ago, sets, volume)
 switching tabs. Today's sets are excluded (already on screen above), it's
 capped at ten sessions with a pointer to the History tab, and it renders on
 first open rather than every repaint.
+
+### Supersets (paired exercises)
+
+Pairs of exactly two exercises, plan-level and permanent — configured once on
+the Plan tab, not a session-only choice. Circuits of three or more were
+considered and scoped out: the rest-timer rule below only has to ask
+"first-in-the-pair or second," which stops being a clean question the moment
+a third exercise joins, since "has everyone in the round gone yet" is a
+different (and materially more code) question.
+
+**Configuring a pair — Plan tab.** Each exercise in `renderPlanDayOverview()`
+gets an inline `<select>` listing that day's *other* exercises (not the
+full-screen `openExercisePicker()` — pairing only makes sense within a day
+already being trained, and the catalog-wide picker would happily offer
+exercises not even on it), saving on `change` like every other setting in
+this app. **`setPlanPairing(planId, dayIndex, exerciseId, partnerExerciseId)`**
+(11-plan.js) writes `pairedExerciseId` **symmetrically on both slots** — A
+points at B's `exerciseId`, B points at A's — and breaks whatever either side
+was previously paired with on both ends first, since an exercise can only be
+paired with one other at a time. A day can't have two slots sharing one
+`exerciseId` (`generatePlanWithAI()` already enforces this, dropping
+duplicates at generation time), so the reference is always unambiguous. Once
+paired, the select gives way to a plain "⇄ Paired with {name}" tag and an
+Unpair button. **Swapping a paired exercise clears the pairing on both
+sides** (`plan-swap-open`'s handler, before calling `updatePlanDayExercise()`)
+— a pairing is specific to the exercise being replaced and shouldn't silently
+carry onto whatever takes its slot; without this, `Object.assign()` would
+leave the old `pairedExerciseId` sitting on a slot that now names a different
+exercise entirely, while the untouched partner still points at an id that no
+longer means what it used to.
+
+**Which one is "first."** Rather than a stored role field, whichever slot
+comes first in `day.exercises`' own array order is "first" — the plan's own
+exercise order is what the lifter actually sees top to bottom, so it doubles
+as the round order for free. `isFirstOfActiveSupersetPair(day,
+origExerciseId, exerciseSwaps, supersetsEnabled)` (09-workout.js) is a pure
+function computing this from plain inputs (no store reads), specifically so
+it can be unit tested the same direct way `shouldRestAfter()` already is.
+
+**Active workout display.** `buildCard()` resolves pairing from the
+**original** plan-slot identity (`slot.pairedExerciseId`, carried on the
+card's `data-orig-exid`), not the post-swap effective id, and only treats a
+pair as active when `supersetsEnabled` is on AND *neither* side has an active
+session-only swap today (`todayWorkout.exerciseSwaps`) — a swap already
+breaks "this is what I planned to superset," so both the tag and the rest
+exception just fall back to plain single-exercise behavior rather than
+showing something half-consistent. Active pairs show "⇄ Superset with
+{partner}" on both cards. No other rendering changes — `doneCount`, row
+building and target-set logic are all still strictly per-exercise; each side
+of a pair tracks its own progress completely independently.
+
+**Rest timer exception.** `WORKOUT_CLICK_ACTIONS['log-set']` calls
+`isFirstOfActiveSupersetPair()` before its normal `shouldRestAfter()` check:
+if the just-logged exercise is the first of an active pair, the rest timer
+is skipped unconditionally (`hideTimerSheet()`) — move straight to the
+partner — regardless of what `shouldRestAfter()` would otherwise say. The
+second exercise of the pair (or an unpaired exercise, or the setting off)
+is governed by `shouldRestAfter()` exactly as before this feature existed.
+
+**The off switch.** `supersetsEnabled` (Settings → Workout, default `true`)
+gates *runtime behavior only* — the tag and the rest-timer exception, both
+checked fresh at render/log time. It does **not** touch `pairedExerciseId`
+on the plan record: a busy commercial gym can make alternating between two
+stations impractical on a given day even when the plan is built around it,
+and the whole point of a global toggle here is that switching it off costs
+nothing to switch back on — the configured pairs are exactly where they
+were left, nothing to reconfigure.
 
 ### Editing a logged set
 
@@ -830,12 +948,30 @@ Both are needed.
 | Per-lift training age | Derived: count of sessions logged for that exercise | `<8` sessions → treated as novice, `<25` → intermediate. Can only ever *speed up*, never slow (the faster of the global and per-lift judgement wins). | Strong. Early gains are substantially motor learning, which is movement-specific — a three-year lifter is a novice at a lift they've never done. |
 | Reps in reserve | Optional, last/binding set only | ≥2 RIR → ×1.25, ≥3 → ×1.5, ≥4 → ×2 | Strongest available signal: it measures the headroom every other variable estimates. Applied gently because self-reported RIR runs optimistic and calibrates with experience. |
 | Bodyweight | Optional setting, entered in the display unit | Bodyweight and assisted exercises compute the percentage off `bodyweight + logged`, not the logged number | Not really an evidence question — a pull-up at +10 is not a 10 lift. |
-| Age | Optional setting | ×0.95 from 40, ×0.85 from 50, ×0.75 from 60 | Direction is solid — rate and recovery decline while gains continue at every age. **The coefficients are a judgment call**, not a literature value; no meta-analysis publishes a per-decade progression multiplier. |
+| Age | Optional setting, derived from `birthday` when given | ×0.95 from 40, ×0.85 from 50, ×0.75 from 60 | Direction is solid — rate and recovery decline while gains continue at every age. **The coefficients are a judgment call**, not a literature value; no meta-analysis publishes a per-decade progression multiplier. |
 | Nutrition phase | Setting | Deficit ×0.6, surplus ×1.1. In a deficit the "didn't progress" message is reworded, since holding load while cutting is a good outcome, not a miss. | Direction well established; magnitudes are a judgment call. |
 
 **Every non-obvious suggestion says why**, appended in parentheses — "only 3
 sessions logged on this lift, so it's treated as new", "slowed for the
 calorie deficit."
+
+**Age is never stale, once a birthday is given.** The plain numeric `age`
+setting used to be the only source — correct the day it's typed, quietly
+wrong every day after, since nothing ever incremented it. `birthday`
+(Settings → Profile, optional, `'YYYY-MM-DD'`) fixes that: `currentAge()`
+(08-progression.js) recomputes the whole-years-old figure fresh on every
+call via `ageFromBirthday(birthday, todayStr())` — string arithmetic, not a
+`Date` object, matching how every other calendar calculation in this app
+(`startOfWeek()`, `weekKeyOfTs()`) already sidesteps timezone surprises. It
+"increments" simply by being read on a different day; nothing has to notice
+a birthday passed. **A birthday, once given, is authoritative** — the whole
+point is an age that's never manually maintained again — so `currentAge()`
+only falls back to the plain `age` setting when no birthday is on file, and
+the Settings UI disables the numeric Age field and auto-fills it with the
+derived value the moment a birthday is entered (`refreshAgeFromBirthday()`,
+07-settings.js), rather than leaving a manual value sitting there that would
+silently stop mattering. Clearing the birthday field re-enables manual entry
+exactly as it worked before this existed.
 
 **Bodyweight follows the canonical-kg rule like every other weight**: stored
 as `bodyweightKg`, entered and displayed in whatever `weightUnit` is set,
@@ -884,6 +1020,43 @@ progress chart (its picker and its two series) reads the same way, for the
 same reason: an exercise logged only as drop/myo sets used to vanish from the
 picker entirely. Volume (`setVolumeKg`) is unaffected — it already sums
 every entry of every set, regardless of type.
+
+### Personal records (PR toast)
+
+**`checkPersonalRecord(exercise, allWorkouts, exerciseId, newSet)`**
+(`08-progression.js`) flags whenever the set just logged is a new all-time
+best for that exercise — by weight, by estimated 1RM, or both — and reuses
+`workingEntry()`/`effectiveLoadKg()` directly rather than a second pass over
+the data, so "what counts as this set's number" can never quietly disagree
+with what the progression algorithm and the History chart already use them
+for. Compared against every OTHER set ever logged for the exercise, with the
+just-logged set itself excluded by its own `ts` (forced unique by `logSet()`
+— see "Set timestamps are unique" under Data integrity). Runs for every set
+type (standard, drop, myo) via `workingEntry()`, the same "judged by the
+first entry" rule the paragraph above already establishes.
+
+**Silent when there's nothing to compare against.** A first-ever logged set
+on an exercise isn't a milestone, it's just the starting point — `weightPR`
+and `e1rmPR` both stay `false` until there's at least one prior set to beat.
+The est-1RM check additionally requires the load be positive (`load > 0`),
+mirroring the progress chart's own rule that Epley is meaningless on a
+negative (assisted) load unless bodyweight makes the effective load
+positive — `effectiveLoadKg()` already accounts for that, so this reuses the
+same condition rather than a second definition of when an estimated 1RM is
+valid. The weight-PR side needs no equivalent guard: `effectiveLoadKg()`'s
+existing sign convention (less assistance is a larger, "better" number)
+already makes a plain `>` comparison correct for assisted exercises, the
+same "top set = max weight" convention established under "Assisted
+movements" below.
+
+**`announcePersonalRecord(exerciseId, newSet)`** (`09-workout.js`) is the one
+place that turns a hit into a toast — `🏆 New best: <weight><unit> — <name>`
+for a weight PR, `🏆 New estimated 1RM — <name>` for an est-1RM-only one
+(weight PR takes priority when a set is genuinely both, being the more
+tangible number of the two) — and is the single call site both places a set
+gets logged (the plan-driven Log button and the drop/myo modal) go through,
+so the announcement can't drift between the two paths the way two separate
+inline checks could.
 
 ### Not implemented, and why
 
@@ -994,6 +1167,89 @@ be typed.
   actually saves Workout Settings, so flipping the unit toggle can't quietly
   re-round and rewrite every configured step (2kg → nearest lb option → back
   to a different kg value).
+
+## Per-side weight (dumbbell/dual-implement ambiguity)
+
+**The ambiguity, and why it mattered.** A logged weight for genuinely
+bilateral dumbbell work (two dumbbells, moved together) is almost always
+typed as what's on ONE of them — but every downstream consumer of "how much
+did they lift" (progression, volume, the strength chart, PR detection) was
+silently reading that number as the whole load, under-counting the real
+total by half. `perSide` (on the exercise record) fixes this without asking
+for a second number: it tells `effectiveLoadKg(exercise, weightKg)`
+(08-progression.js) — already the single choke point every one of those
+consumers runs through — to double the stored value before anything else
+touches it. Fixing it there fixes `progressionPlan()`, `checkPersonalRecord()`,
+`setVolumeKg()`, and the History progress chart's top-set/est-1RM series all
+at once, since none of them compute "true load" any other way.
+
+**Curated per exercise, not guessed from the name.** Unlike `equipment`
+(classified from the name for every exercise, including the 92-entry
+catalog), `perSide` is hand-set directly on the catalog entries that are
+unambiguously bilateral — Dumbbell Bench Press, Incline Dumbbell Press,
+Dumbbell Fly, Dumbbell Shoulder Press, Dumbbell Shrug, Dumbbell Curl, Hammer
+Curl, Incline Dumbbell Curl, Farmers Walk — the same way `primaryMuscle`/
+`secondaryMuscles` already are. A name-based guess was deliberately rejected:
+"dumbbell" alone doesn't say it — Goblet Squat is one implement held with
+both hands, and Dumbbell Row is conventionally one arm at a time, bracing on
+a bench, so the number already IS the true per-rep load for that one. A
+confidently wrong guess there would silently double a lift that was never
+ambiguous in the first place, which is worse than the ambiguity this exists
+to fix — the same "refuse to guess" principle the muscle/equipment
+classifiers and the starting-weight estimator already follow. Both of those
+two catalog entries are left `perSide`-absent (combined, unchanged) on
+purpose.
+
+**Retroactive, but only where it's safe.** `syncDefaultExercises()`
+(12-init.js) propagates the curated value onto matching
+`custom:false`/non-`userEdited` rows on every load, exactly like it already
+does for muscle/equipment corrections — but **only for an exercise with NO
+logged history yet**. An exercise that's already been trained keeps whatever
+`perSide` it currently has (absent, same as today) until confirmed by hand
+on the Exercises tab. This isn't caution for its own sake: there is no way
+to tell, from a stored set alone, whether it was hand-typed (needs doubling)
+or already the true total (e.g. from a prior CSV import — see below), so
+retroactively flipping the flag on a *used* exercise risks silently doubling
+real, already-correct numbers. `loggedExerciseIds` (a `Set` built once per
+sync from `getAllWorkouts()`) is the gate; the curated default only ever
+reaches an exercise nobody has logged against yet.
+
+**Custom, AI-generated and CSV-imported exercises default to `false`
+(unchanged), never guessed** — same reasoning as above, with more force:
+there's no curated ground truth for a name nobody has reviewed, only a
+classifier, and this is exactly the class of mistake a classifier is bad at.
+The Exercises tab's "per side" checkbox (`renderExerciseManager()`, next to
+the muscle/equipment selects, wired through
+`EXERCISE_MANAGER_CHANGE_ACTIONS['toggle-per-side']`) is the one place it's
+ever set for anything the catalog doesn't already cover — same
+`userEdited`/refresh pattern `set-equipment` already uses, since it feeds
+the same progression math.
+
+**The CSV importer halves the weight, not just the flag, when it resolves
+to a `perSide` exercise.** Fitbod's own `multiplier` column already produces
+the true combined total at parse time (see "CSV import" below) — a *raw*
+20kg row with `multiplier: 2` becomes `effectiveWeight: 40`, the true total.
+If that row's exercise name resolves to an EXISTING `perSide:true` record
+(a curated catalog entry, or a custom one the user has already toggled —
+this is a real case: CSV import matches by name the same way everything
+else does, so "Dumbbell Bench Press" in a file lands on the same record as
+the one the catalog curates), storing that 40kg total as-is would then get
+doubled a *second* time by `effectiveLoadKg()` at read time. The importer
+(06-catalog-import-backup.js, right where each set is pushed onto the
+workout) halves it back down to "one side" (20kg) before storing, so the two
+doublings — the file's own multiplier, and `effectiveLoadKg()`'s — cancel
+out and land on the same true total regardless of whether an exercise's
+history came from hand-entry or an import.
+
+**Visible wherever a weight gets typed.** Every weight `<input>` for logging
+or editing a set — the active-workout next-set row, its done-set inline
+edit, the drop/myo modal's entry rows, and the History tab's inline edit —
+shows a small dim "per side" pill next to the field for a `perSide`
+exercise (`perSideNoteHtml(exercise)`, 03-helpers.js, shared by all four
+render sites so the wording can't drift between them). It's a reminder of
+what the app is about to do with the number, not an instruction — the field
+itself is untouched; you still type what's on one dumbbell, exactly as
+before.
 
 ## AI plan generation (OpenRouter)
 
@@ -1251,9 +1507,12 @@ future occurrence of that day). **Workout tab = doing today's workout**
 read-only-ish structural view — every day, every exercise, its prescribed
 `targetSets` × rep range, and a **Swap** button. No suggestion text, no
 set-logging rows, no progress counts. Swap reveals a muscle-grouped
-`<select>` of the full library (disliked exercises excluded) and writes
-through `updatePlanDayExercise()`, replacing that slot's `exerciseId`/`name`
-in the `plans` record permanently.
+`<select>` of the full library (disliked exercises excluded, **and every
+exercise already elsewhere in the same day** — picking one that's already
+in the day would create two slots sharing one `exerciseId`, which
+`data-exid` addressing, session swaps and `setPlanPairing()` all assume
+can't happen) and writes through `updatePlanDayExercise()`, replacing that
+slot's `exerciseId`/`name` in the `plans` record permanently.
 
 **Workout tab** (`refreshActiveWorkoutSection()` → `renderActiveWorkout()`):
 the active-workout experience described under "Set logging UX" above. It
@@ -1274,6 +1533,56 @@ gets its own Swap, scoped to today only:
 - `deleteSet()`'s cleanup guard (don't delete an empty `workouts` record)
   also checks for `exerciseSwaps`, same reasoning as
   `targetOverrides`/`startedAt`.
+
+## Plan history
+
+**"Current" is an explicit pointer, not just "the newest."**
+`getCurrentPlan()` reads the `activePlanId` setting first; if it's set and
+that plan record still exists, that plan is current, full stop. Only when
+`activePlanId` is unset (a restored backup or database from before this
+feature existed) or points at a plan that's gone does it fall back to its
+original behavior — newest by `createdAt`. `generatePlanWithAI()` calls
+`setCurrentPlan(planId)` (just `setSetting('activePlanId', planId)`) right
+after saving a new plan, so a fresh generation is always explicitly current
+rather than relying on the createdAt fallback either. Reverting a plan's
+`createdAt` on reactivation was considered and rejected — it would misreport
+the reactivated plan's real age everywhere else that reads it (the
+weekly-regen banner, "generated N weeks ago"), and an honest "this plan is 3
+weeks old" is more useful than a lie that makes it look brand new.
+
+**Every generated plan is pruned unless it was actually trained from.** A
+plan record with nothing ever logged against it — generated, disliked, and
+immediately regenerated, which is also exactly what testing this feature
+looks like — is noise, not history, and would otherwise sit in the `plans`
+store forever with nothing pointing at it. `planHasBeenTrained(planId,
+allWorkouts)` (11-plan.js) checks for at least one `workouts` record with
+that `planId` and at least one set logged (a zero-exercise "Start tapped,
+nothing logged" record doesn't count) — the exact same check
+`generatePlanWithAI()` already used to decide the AI variety prompt's
+"previous plan," now shared rather than duplicated. Right after a new plan
+is confirmed saved, if the plan it's replacing fails this check, it's
+deleted (`deleteRecord('plans', oldPlan.id)`); if it passes, it's left
+alone and becomes part of the "Past plans" browser below. The prune only
+ever runs after the new plan is safely written, so a failed or aborted
+generation never leaves the old plan deleted with nothing to replace it.
+
+**"Past plans" browser** (`renderPlanHistory()`, called from
+`refreshPlanTab()`): every plan except the current one, newest first, each a
+collapsed `<details class="session">` — reusing the History tab's own
+collapsed-card styling rather than inventing a second one, since browsing a
+list of past records is the same shape either way. Because pruning already
+guarantees everything left here was genuinely trained from, the list needs
+no filtering of its own. The whole disclosure hides itself when there's
+nothing to browse. Each entry's body (`planDaySummaryHtml()`) is a plain
+read-only day/exercise listing — no Swap button, no `data-planid` edit
+wiring — since a past plan isn't editable, only revivable via its "Make this
+plan active" button (`setCurrentPlan()` + the same `selectedLogDayIdx =
+null` reset every other plan-replacing action already performs, since a
+day index from whatever was current a moment ago doesn't mean anything
+against the reactivated plan). Reactivating deliberately does **not** touch
+`planWeekDismissed` — if the reactivated plan is old, the weekly-regen
+banner evaluates it exactly as it would any other current plan, rather than
+being silenced as a side effect of switching.
 
 ## History tab — range, search, charts, collapsed sessions
 
@@ -1491,8 +1800,15 @@ consults them again.
 `ageRateMultiplier` — a defensible shape, not numbers from a study.
 Dumbbells carry a real ambiguity: the Fitbod importer stores them as
 *total* load (multiplier 2.0) while hand-entry is almost certainly *per
-hand*, and nothing in the store distinguishes the two — which cancels
-within tier 1 and is the main reason tiers 2 and 3 are deliberately timid.
+hand* — see "Per-side weight" below for how `perSide` now resolves this for
+progression, volume, the strength chart and PR detection. This heuristic is
+the one place it's **not** resolved: `estimateStartingWeight()` works off
+raw historical weights directly rather than through `effectiveLoadKg()`, so
+a `perSide` flag doesn't reach its cross-equipment tier comparisons — which
+cancels within tier 1 (same equipment on both sides of the comparison) and
+is the main reason tiers 2 and 3 are deliberately timid. Left as a known
+follow-up rather than fixed here, since threading `perSide` through the
+heuristic's cross-equipment ratio table is a separate piece of work.
 
 ## Weekly progress ("it's Wednesday, X to go")
 

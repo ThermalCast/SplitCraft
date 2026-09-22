@@ -90,6 +90,21 @@ ok('RIR ladder is monotonic and gentle',
 ok('assisted work uses bodyweight when known',
    app.effectiveLoadKg({ equipment: 'assisted' }, -45) === -45, 'bodyweight is 0 in this run, so unchanged');
 
+// perSide doubles the stored weight into the real total -- the fix for the
+// dumbbell per-hand-vs-combined ambiguity (see "Per-side weight" in
+// design-summary.md). effectiveLoadKg() is the single choke point every
+// consumer of "true load" runs through, so this one check stands in for all
+// of them (progressionPlan, checkPersonalRecord, setVolumeKg, the chart).
+ok('perSide doubles the stored weight into the real total',
+   app.effectiveLoadKg({ equipment: 'dumbbell', perSide: true }, 20) === 40);
+ok('perSide: false (or absent) leaves the weight unchanged',
+   app.effectiveLoadKg({ equipment: 'dumbbell' }, 20) === 20
+   && app.effectiveLoadKg({ equipment: 'dumbbell', perSide: false }, 20) === 20);
+ok('perSideNoteHtml() renders a note only when the flag is set',
+   app.perSideNoteHtml({ perSide: true }).includes('per side')
+   && app.perSideNoteHtml({ perSide: false }) === ''
+   && app.perSideNoteHtml(null) === '');
+
 // Rest-timer suppression on the set that completes an exercise.
 ok('no rest after the completing set', app.shouldRestAfter(3, 3) === false);
 ok('rest between sets of the same exercise', app.shouldRestAfter(1, 3) && app.shouldRestAfter(2, 3));

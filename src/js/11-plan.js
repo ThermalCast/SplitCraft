@@ -2,10 +2,37 @@
   // =========================================================================
   // Plan tab
   // =========================================================================
+  // "Current" is normally just the newest plan, but reverting to an older
+  // one from the "Past plans" history (see renderPlanHistory() below) has to
+  // override that without touching createdAt -- backdating a reactivated
+  // plan would misreport its actual age everywhere else that reads
+  // createdAt (the weekly-regen banner, "generated N weeks ago"). A
+  // restored backup or a pre-feature database with no activePlanId setting
+  // yet falls straight through to the newest-by-createdAt behavior this
+  // always had.
   async function getCurrentPlan() {
+    const activeId = await getSetting('activePlanId', null);
+    if (activeId != null) {
+      const active = await getRecord('plans', activeId);
+      if (active) return active;
+    }
     const plans = await getAllRecords('plans');
     if (plans.length === 0) return null;
     return plans.sort((a, b) => b.createdAt - a.createdAt)[0];
+  }
+  async function setCurrentPlan(planId) {
+    await setSetting('activePlanId', planId);
+  }
+
+  // A plan only counts as "trained" once at least one real set has been
+  // logged against it -- workouts.planId links a logged day back to the
+  // plan it was logged from, but a workout record with zero exercises
+  // (Start tapped, nothing ever logged) doesn't count. Shared by the AI
+  // variety prompt's "previous plan" lookup (generatePlanWithAI(), below)
+  // and by the prune-on-generate policy in the same function, so the two
+  // can never disagree about what "used" means.
+  function planHasBeenTrained(planId, allWorkouts) {
+    return allWorkouts.some(w => w.planId === planId && w.exercises.some(ex => ex.sets.length > 0));
   }
 
   // The "Generate a new plan" disclosure starts open when there's nothing to
@@ -48,6 +75,7 @@
       container.innerHTML = '<div class="empty">No plan yet.<br>Generate one below and it becomes your active workout on the Log tab.</div>';
       overview.innerHTML = '';
       await refreshWeeklyPlanPrompt(null);
+      await renderPlanHistory(null);
       await refreshActiveWorkoutSection();
       return;
     }
@@ -60,6 +88,7 @@
     `;
     await refreshWeeklyPlanPrompt(plan);
     await renderPlanDayOverview(plan);
+    await renderPlanHistory(plan);
     await refreshActiveWorkoutSection();
   }
 
@@ -191,9 +220,21 @@
       const oldExerciseId = Number(group.dataset.exid);
       const planId = Number(group.dataset.planid);
       const dayIdx = Number(group.dataset.dayidx);
+      // Excludes every exercise already in this day, not just the one being
+      // replaced — picking one that's already elsewhere in the day would
+      // create two slots sharing one exerciseId, which everything
+      // downstream (data-exid addressing, session swaps, setPlanPairing())
+      // assumes can't happen (see the dedup comment in
+      // generatePlanWithAI()). Falls back to excluding only oldExerciseId
+      // if the plan/day is gone by the time this opens.
+      const planForExclude = await getRecord('plans', planId);
+      const dayForExclude = planForExclude && planForExclude.days && planForExclude.days[dayIdx];
+      const excludeIds = dayForExclude
+        ? new Set(dayForExclude.exercises.map(e => e.exerciseId))
+        : new Set([oldExerciseId]);
       await openExercisePicker({
         title: 'Replace this exercise',
-        excludeIds: new Set([oldExerciseId]),
+        excludeIds,
         onSelect: async (newExerciseId) => {
           // Everything here is re-read from the store rather than trusted
           // from the DOM, so any of it can be gone by the time the picker
@@ -207,10 +248,33 @@
           if (exIndex === -1) return;
           const newEx = await getRecord('exercises', newExerciseId);
           if (!newEx) return;
+          // A superset pairing belongs to the exercise being replaced, not
+          // to whatever takes its slot — clear it (both sides, symmetrically
+          // — see setPlanPairing()) before the swap itself, rather than
+          // silently carrying a stale link onto the new exercise.
+          if (day.exercises[exIndex].pairedExerciseId != null) {
+            await setPlanPairing(planId, dayIdx, oldExerciseId, null);
+          }
           await updatePlanDayExercise(planId, dayIdx, exIndex, { exerciseId: newExerciseId, name: newEx.name });
           await refreshPlanTab();
         }
       });
+    },
+    'plan-pair-unpair': async (el) => {
+      const group = el.closest('.exercise-group');
+      if (!group) return;
+      await setPlanPairing(Number(group.dataset.planid), Number(group.dataset.dayidx), Number(group.dataset.exid), null);
+      await refreshPlanTab();
+    },
+  };
+
+  const PLAN_DAY_CHANGE_ACTIONS = {
+    'plan-pair-select': async (el) => {
+      const group = el.closest('.exercise-group');
+      if (!group) return;
+      const partnerId = el.value ? Number(el.value) : null;
+      await setPlanPairing(Number(group.dataset.planid), Number(group.dataset.dayidx), Number(group.dataset.exid), partnerId);
+      await refreshPlanTab();
     },
   };
 
@@ -239,6 +303,20 @@
       const estimate = estimateSessionMinutes(day.exercises, pace);
       const exRows = [];
       day.exercises.forEach((ex, exIdx) => {
+        // Superset pairing — scoped to exercises already in THIS day, not
+        // the whole catalog (openExercisePicker() would offer exercises not
+        // even on the day, which makes no sense to "pair" with). A plain
+        // inline <select> rather than the full-screen picker, saving on
+        // change like every other setting in this app. Once paired, the
+        // select gives way to a plain tag + Unpair — the picker has nothing
+        // left to offer once there's a partner.
+        const partner = ex.pairedExerciseId != null ? day.exercises.find(o => o.exerciseId === ex.pairedExerciseId) : null;
+        const otherExercises = day.exercises.filter(o => o.exerciseId !== ex.exerciseId);
+        const pairControl = partner
+          ? `<div class="meta-row pair-row">⇄ Paired with ${esc(partner.name)} <button type="button" class="link-btn" data-action="plan-pair-unpair">Unpair</button></div>`
+          : otherExercises.length
+            ? `<div class="meta-row pair-row"><select data-action="plan-pair-select"><option value="">Pair with…</option>${otherExercises.map(o => `<option value="${o.exerciseId}">${esc(o.name)}${o.pairedExerciseId != null ? ' (breaks its current pairing)' : ''}</option>`).join('')}</select></div>`
+            : '';
         exRows.push(`
           <div class="exercise-group" data-exid="${ex.exerciseId}" data-planid="${plan.id}" data-dayidx="${dayIdx}">
             <div class="ex-name">
@@ -246,6 +324,7 @@
               <button type="button" class="swap-btn" data-action="plan-swap-open">Swap</button>
             </div>
             <div class="meta-row">${ex.targetSets} sets × ${ex.repRangeMin}-${ex.repRangeMax} reps · ~${Math.round(estimate.perExercise[exIdx].minutes)} min <span class="setup-note" title="Includes about ${Math.round(pace.minutesPerSetup)} min to reach the station, set it up and warm up">incl. setup</span></div>
+            ${pairControl}
           </div>
         `);
       });
@@ -267,6 +346,7 @@
     container.innerHTML = blocks.join('');
 
     delegate(container, 'click', PLAN_DAY_CLICK_ACTIONS);
+    delegate(container, 'change', PLAN_DAY_CHANGE_ACTIONS);
   }
 
   // Edits the plan itself (permanent, unlike the session-only swap/overrides
@@ -280,6 +360,112 @@
     Object.assign(ex, updates);
     await putRecord('plans', plan);
     return plan;
+  }
+
+  // Superset pairing — a plan-day exercise slot optionally carries
+  // `pairedExerciseId`, set symmetrically on both paired slots. A day can't
+  // have two slots sharing one exerciseId (generatePlanWithAI() already
+  // enforces this — see the dedup comment where it builds `days`), so this
+  // reference is always unambiguous; which one is "first" (skips the
+  // post-set rest) is derived from array order at read time in
+  // 09-workout.js, not stored here. An exercise can only be paired with one
+  // other at a time, so establishing a new link breaks whatever either side
+  // was previously paired with, on both ends — re-pairing A→C must also
+  // free B (A's old partner) rather than leave it pointing at an A that no
+  // longer points back.
+  async function setPlanPairing(planId, dayIndex, exerciseId, partnerExerciseId) {
+    const plan = await getRecord('plans', planId);
+    if (!plan) return null;
+    const day = plan.days[dayIndex];
+    if (!day) return null;
+    const a = day.exercises.find(e => e.exerciseId === exerciseId);
+    if (!a) return null;
+    if (a.pairedExerciseId != null) {
+      const oldPartner = day.exercises.find(e => e.exerciseId === a.pairedExerciseId);
+      if (oldPartner) delete oldPartner.pairedExerciseId;
+    }
+    if (partnerExerciseId == null) {
+      delete a.pairedExerciseId;
+    } else {
+      const b = day.exercises.find(e => e.exerciseId === partnerExerciseId);
+      if (!b) return null;
+      if (b.pairedExerciseId != null) {
+        const bOldPartner = day.exercises.find(e => e.exerciseId === b.pairedExerciseId);
+        if (bOldPartner) delete bOldPartner.pairedExerciseId;
+      }
+      a.pairedExerciseId = partnerExerciseId;
+      b.pairedExerciseId = exerciseId;
+    }
+    await putRecord('plans', plan);
+    return plan;
+  }
+
+  // =========================================================================
+  // Plan history — "Past plans" browser
+  //
+  // Everything left in the `plans` store once pruning (generatePlanWithAI(),
+  // above) has run was genuinely trained from, so this needs no filtering of
+  // its own beyond excluding whichever one is current right now. A plain
+  // read-only day/exercise listing, not renderPlanDayOverview() reused --
+  // that one is wired for permanent editing (Swap, data-planid) of the
+  // CURRENT plan, and a past plan isn't editable, only revivable.
+  // =========================================================================
+  function planDaySummaryHtml(plan) {
+    return plan.days.map(day => `
+      <div class="day-block">
+        <div class="day-date">${esc(day.name)}</div>
+        ${day.exercises.map(ex => `<div class="meta-row">${esc(ex.name)} — ${ex.targetSets} × ${ex.repRangeMin}-${ex.repRangeMax}</div>`).join('')}
+      </div>
+    `).join('');
+  }
+
+  const PLAN_HISTORY_ACTIONS = {
+    'make-plan-active': async (el) => {
+      const planId = Number(el.dataset.planid);
+      await setCurrentPlan(planId);
+      // A stale day index from whichever plan was current a moment ago makes
+      // no sense against the reactivated one — the same reset every path
+      // that replaces the current plan already performs.
+      selectedLogDayIdx = null;
+      toast('Switched to that plan');
+      await refreshPlanTab();
+    },
+  };
+
+  async function renderPlanHistory(currentPlan) {
+    const details = document.getElementById('plan-history-disclosure');
+    const list = document.getElementById('plan-history-list');
+    if (!details || !list) return;
+    const allPlans = await getAllRecords('plans');
+    const others = allPlans
+      .filter(p => !currentPlan || p.id !== currentPlan.id)
+      .sort((a, b) => b.createdAt - a.createdAt);
+    if (others.length === 0) { details.hidden = true; list.innerHTML = ''; return; }
+    details.hidden = false;
+    // A stable id rather than details.querySelector('summary') — this app's
+    // dynamic text always lives on an element fetched directly by id (see
+    // every other summary-line update in this file), never patched in by
+    // querying into markup that was just set via innerHTML.
+    document.getElementById('plan-history-summary').textContent = `Past plans (${others.length})`;
+    const thisWeek = startOfWeek(todayStr());
+    // Reuses History's .session/.session-body collapsed-card styling
+    // (05-history.js's renderExerciseGroup() list) rather than inventing a
+    // parallel one — a nested <details> browsing past records is the exact
+    // same shape as a collapsed session.
+    list.innerHTML = others.map(p => {
+      const weeksOld = weeksBetween(weekKeyOfTs(p.createdAt), thisWeek);
+      const age = weeksOld === 0 ? 'this week' : weeksOld === 1 ? 'last week' : `${weeksOld} weeks ago`;
+      return `
+        <details class="session">
+          <summary><span class="session-info"><span class="session-title">${esc(p.goal)}</span><span class="session-digest">${p.days.length} days · generated ${age}</span></span></summary>
+          <div class="session-body">
+            ${planDaySummaryHtml(p)}
+            <button type="button" class="add-exercise-btn" data-action="make-plan-active" data-planid="${p.id}">Make this plan active</button>
+          </div>
+        </details>
+      `;
+    }).join('');
+    delegate(list, 'click', PLAN_HISTORY_ACTIONS);
   }
 
   // The free-text box is only meaningful for the 'custom' choice, so it stays
@@ -348,6 +534,10 @@
       throw new Error('A plan is already being generated — wait for it to finish before starting another.');
     }
     planGenerationInFlight = true;
+    // Captured up front, before anything below changes what "current" means
+    // -- the prune-on-generate check near the end needs to know exactly
+    // which plan this generation is about to replace.
+    const oldPlan = await getCurrentPlan();
     try {
     logPlanStatus('Checking OpenRouter settings…');
     const apiKey = await getSetting('openrouterKey', '');
@@ -411,12 +601,7 @@
     // set — checked via workouts.planId, the same link the Log tab writes
     // when a set is logged against a plan day.
     const workoutsForVariety = await getAllWorkouts();
-    const usedPlanIds = new Set(
-      workoutsForVariety
-        .filter(w => w.planId != null && w.exercises.some(ex => ex.sets.length > 0))
-        .map(w => w.planId)
-    );
-    const usedPlans = existingPlans.filter(p => usedPlanIds.has(p.id));
+    const usedPlans = existingPlans.filter(p => planHasBeenTrained(p.id, workoutsForVariety));
     const previousPlan = usedPlans.length ? usedPlans.sort((a, b) => b.createdAt - a.createdAt)[0] : null;
     const previousPlanText = previousPlan
       ? previousPlan.days.map(d => `${d.name}: ${d.exercises.map(e => e.name).join(', ')}`).join('\n')
@@ -641,6 +826,7 @@ ${schemaExample}`;
       - plan.days.reduce((a, d) => a + d.exercises.length, 0);
     if (dropped > 0) logPlanStatus(`Dropped ${dropped} duplicate exercise slot(s) the model repeated within a day.`);
     await addRecord('plans', plan);
+    await setCurrentPlan(plan.id);
     logPlanStatus('Plan saved.');
     } catch (err) {
       // Roll back any brand-new exercise records created above before the
@@ -650,6 +836,27 @@ ${schemaExample}`;
         try { await deleteRecord('exercises', id); } catch (e) { /* ignore */ }
       }
       throw err;
+    }
+
+    // PRUNE THE PLAN THIS ONE JUST REPLACED, BUT ONLY IF IT WAS NEVER
+    // TRAINED FROM. A plan generated, disliked, and immediately regenerated
+    // is noise, not history, and would otherwise accumulate in the store
+    // forever with nothing ever pointing at it. A plan that WAS trained from
+    // is left untouched and becomes part of the "Past plans" browser
+    // (renderPlanHistory(), below) — reusing the same planHasBeenTrained()
+    // check the variety prompt above just used, so the two can't disagree
+    // about what counts as "used." Runs only after the new plan is
+    // confirmed written above, so a failed/aborted generation never deletes
+    // the old plan with nothing to replace it.
+    //
+    // Re-fetched here rather than reusing workoutsForVariety (captured
+    // BEFORE the network call above, which can run for tens of seconds): a
+    // set logged against oldPlan while generation was in flight would be
+    // invisible to a stale snapshot, and the plan would be wrongly deleted
+    // despite having just been genuinely trained from.
+    if (oldPlan && !planHasBeenTrained(oldPlan.id, await getAllWorkouts())) {
+      await deleteRecord('plans', oldPlan.id);
+      logPlanStatus('Removed the previous plan — it was never trained from.');
     }
 
     // Second pass, and deliberately after the plan is safely stored: a failure

@@ -61,6 +61,7 @@
           <span class="set-idx">${i + 1}</span>
           ${s.entries[0].weight < 0 ? `<button type="button" class="sign-btn negative" data-action="toggle-sign" title="Toggle negative \u2014 for assisted reps, enter how much weight is taken off you">\u00b1</button>` : ''}
           <input type="number" inputmode="decimal" step="0.5" class="set-edit-weight" data-action="edit-set" aria-label="Weight" value="${displayWeight(s.entries[0].weight)}">
+          ${perSideNoteHtml(exercise)}
           <input type="number" inputmode="numeric" step="1" min="1" class="set-edit-reps" data-action="edit-set" aria-label="Reps" value="${s.entries[0].reps}">
           ${delBtn}
         `;
@@ -605,7 +606,7 @@
         if (!en) return;
         const load = effectiveLoadKg(chartExercise, en.weight);
         if (topW === null || load > topW) topW = load;
-        const est = load * (1 + en.reps / 30);
+        const est = epley1RM(load, en.reps);
         if (top1 === null || est > top1) top1 = est;
       });
       if (topW !== null) byDate.set(w.date, { topW, top1 });

@@ -1128,11 +1128,22 @@ check('no prompt when there is no plan yet', promptBox.hidden === true);
     !!prompt1 && !prompt1.includes("Here is the user's previous plan"),
     prompt1 && prompt1.includes("Here is the user's previous plan") ? 'prompt still includes a previous-plan block' : 'no call made');
 
-  // Now actually train that plan: log one set against it, the same link the
-  // Log tab writes (workout.planId) when a set is logged against a plan day.
+  // generatePlanWithAI() also PRUNES the unused plan it just replaced (see
+  // planHasBeenTrained()/"Plan history" in design-summary.md) — not merely
+  // excludes it from the prompt, the record itself is gone.
+  check('the unused plan generatePlanWithAI() just replaced was pruned outright',
+    (await app.getRecord('plans', unusedPlanId)) == null);
+
+  // Pruning means a plan can only ever be trained from WHILE it's current —
+  // once superseded it's gone, same as the real app (the Log tab only ever
+  // shows getCurrentPlan()). So "train the plan and check it's offered as
+  // previous next time" now has to train the plan generatePlanWithAI() just
+  // created, not the one that's already been pruned.
+  const trainedPlan = await app.getCurrentPlan();
+  const trainedExId = trainedPlan.days[0].exercises[0].exerciseId;
   await app.addRecord('workouts', {
-    date: '2026-01-01', ts: Date.now(), planId: unusedPlanId, dayIndex: 0, dayName: 'Legs',
-    exercises: [{ exerciseId: legPressId, sets: [{ weight: 100, reps: 10 }] }]
+    date: '2026-01-01', ts: Date.now(), planId: trainedPlan.id, dayIndex: 0, dayName: trainedPlan.days[0].name,
+    exercises: [{ exerciseId: trainedExId, sets: [{ weight: 100, reps: 10 }] }]
   });
 
   let prompt2 = null;
@@ -1142,8 +1153,79 @@ check('no prompt when there is no plan yet', promptBox.hidden === true);
 
   const previousPlanBlock2 = prompt2 && prompt2.split("Here is the user's previous plan")[1];
   check('a plan with a logged set against it IS offered to the AI as "previous"',
-    !!previousPlanBlock2 && previousPlanBlock2.includes('Leg Press'),
-    prompt2 ? (previousPlanBlock2 ? 'block present but missing Leg Press' : 'no previous-plan block included') : 'no call made');
+    !!previousPlanBlock2 && previousPlanBlock2.includes('Push-Up'),
+    prompt2 ? (previousPlanBlock2 ? 'block present but missing Push-Up' : 'no previous-plan block included') : 'no call made');
+
+  // ...and BECAUSE it was trained, it survives being replaced (unlike the
+  // unused plan pruned above) — it's exactly the kind of record the "Past
+  // plans" browser is for.
+  check('a trained plan survives being replaced by the next generation',
+    (await app.getRecord('plans', trainedPlan.id)) != null);
+}
+
+// ---------------------------------------------------------------------------
+// Prune-on-generate must not delete a plan trained from WHILE generation was
+// in flight. The variety-prompt lookup snapshots workouts BEFORE the
+// OpenRouter network call (which can run for tens of seconds); the prune
+// check has to re-fetch fresh rather than reuse that stale snapshot, or a
+// set logged mid-generation is invisible to it and the plan gets deleted
+// despite having just been genuinely trained from.
+// ---------------------------------------------------------------------------
+{
+  for (const p of await app.getAllRecords('plans')) await app.deleteRecord('plans', p.id);
+  await app.clearWorkoutHistory();
+  await app.clearSetting('activePlanId');
+
+  const legPressId = (await app.getAllRecords('exercises')).find(e => e.name === 'Leg Press').id;
+  const oldPlanId = await app.addRecord('plans', {
+    createdAt: Date.now(), goal: 'Old', daysPerWeek: 3, equipment: '', notes: '',
+    repRangeMin: 8, repRangeMax: 12, fixedSets: null,
+    days: [{ name: 'Legs', exercises: [{ exerciseId: legPressId, name: 'Leg Press', targetSets: 3, repRangeMin: 8, repRangeMax: 12 }] }]
+  });
+  await app.setCurrentPlan(oldPlanId);
+
+  const minimalPlanFetch = async () => ({ ok: true, status: 200, statusText: 'OK', body: null,
+    json: async () => ({ choices: [{ message: { content: JSON.stringify({ days: [
+      { name: 'Day 1', exercises: [{ name: 'Push-Up', targetSets: 3, repRangeMin: 8, repRangeMax: 12 }] }
+    ] }) } }] }) });
+
+  // Forces the FIRST getAllWorkouts() call (the variety-prompt lookup,
+  // taken before the network call) to return a genuinely detached snapshot
+  // — a .slice() copy — rather than the harness's in-memory store, which
+  // otherwise returns the SAME array object on every call; a later
+  // addRecord('workouts', ...) pushes onto that shared array, so a plain
+  // re-fetch could pass this test even with the stale reference bug still
+  // present. A .slice() copy is what a real IndexedDB query actually
+  // produces (a fresh result set, never a live reference), so this is what
+  // makes the test meaningful rather than accidentally vacuous.
+  const realGetAllWorkouts = app.getAllWorkouts;
+  let getAllWorkoutsCalls = 0;
+  app.getAllWorkouts = async () => {
+    getAllWorkoutsCalls++;
+    const live = await realGetAllWorkouts();
+    return getAllWorkoutsCalls === 1 ? live.slice() : live;
+  };
+
+  // Simulates a real set being logged against oldPlan WHILE the network
+  // call is in flight -- the exact race the fix closes.
+  app.fetch = async (url, opts) => {
+    await app.addRecord('workouts', {
+      date: '2026-03-01', ts: Date.now(), planId: oldPlanId, dayIndex: 0, dayName: 'Legs',
+      exercises: [{ exerciseId: legPressId, sets: [{ weight: 60, reps: 8 }] }]
+    });
+    return minimalPlanFetch();
+  };
+
+  await app.generatePlanWithAI({ goal: 'Hypertrophy', daysPerWeek: 3, equipment: '', notes: '',
+    repRangeMin: 8, repRangeMax: 12, splitType: 'auto', fixedSets: null });
+
+  app.getAllWorkouts = realGetAllWorkouts;
+
+  check('a plan trained from WHILE generation was in flight survives the prune',
+    (await app.getRecord('plans', oldPlanId)) != null);
+
+  await app.clearWorkoutHistory();
+  await app.clearSetting('activePlanId');
 }
 
 // ---------------------------------------------------------------------------
@@ -1441,6 +1523,63 @@ check('clearSetting removes it from the cache',
   check('an untouched built-in is still corrected by the catalog sync',
     (await app.getRecord('exercises', bp2.id)).primaryMuscle === 'lats',
     (await app.getRecord('exercises', bp2.id)).primaryMuscle);
+
+  // --- perSide is curated on specific catalog entries and propagates the
+  // same way muscle/equipment corrections already do (the "retroactive
+  // default" this feature was built to apply). ---
+  const dbBench = find('Dumbbell Bench Press');
+  const dbBenchRec = await app.getRecord('exercises', dbBench.id);
+  delete dbBenchRec.perSide; // simulate a pre-feature record that never had it
+  delete dbBenchRec.userEdited;
+  await app.putRecord('exercises', dbBenchRec);
+  await app.syncDefaultExercises();
+  check('a curated bilateral catalog exercise picks up perSide:true on sync',
+    (await app.getRecord('exercises', dbBench.id)).perSide === true);
+
+  const gobletSquat = find('Goblet Squat');
+  check('a single-implement catalog exercise (Goblet Squat) is NOT marked perSide',
+    !(await app.getRecord('exercises', gobletSquat.id)).perSide);
+
+  // A curated exercise that already has logged history must NOT be
+  // auto-flipped -- there's no way to tell from the stored data whether
+  // that history was hand-typed (needs doubling) or already the true total
+  // (e.g. a prior CSV import), so retroactively changing perSide there
+  // risks silently corrupting real numbers. Same protection either
+  // direction: an exercise the user has already logged against is left
+  // exactly as it was, on.
+  const inclinePress = find('Incline Dumbbell Press');
+  const inclineRec = await app.getRecord('exercises', inclinePress.id);
+  delete inclineRec.perSide;
+  delete inclineRec.userEdited;
+  await app.putRecord('exercises', inclineRec);
+  const inclineWorkoutId = await app.addRecord('workouts', {
+    date: '2026-01-15', ts: Date.now(), planId: null, dayIndex: null, dayName: null,
+    exercises: [{ exerciseId: inclinePress.id, sets: [{ ts: Date.now(), type: 'standard', entries: [{ weight: 20, reps: 8 }] }] }]
+  });
+  await app.syncDefaultExercises();
+  check('a curated exercise with EXISTING logged history is NOT auto-flipped to perSide',
+    !(await app.getRecord('exercises', inclinePress.id)).perSide);
+  // Leave state clean for later tests: remove only the fixture workout, not
+  // the whole store, and restore the curated default so this exercise
+  // matches what the rest of the suite expects going forward.
+  await app.deleteRecord('workouts', inclineWorkoutId);
+  await app.putRecord('exercises', { ...(await app.getRecord('exercises', inclinePress.id)), perSide: true });
+
+  const dbRow = find('Dumbbell Row');
+  check('the deliberately-uncurated Dumbbell Row is NOT marked perSide',
+    !(await app.getRecord('exercises', dbRow.id)).perSide);
+
+  // A hand-toggled perSide must survive the sync exactly like a hand-edited
+  // muscle/equipment already does.
+  const dbFly = await app.getRecord('exercises', find('Dumbbell Fly').id);
+  dbFly.perSide = false; // user disagrees with the curated default
+  dbFly.userEdited = true;
+  await app.putRecord('exercises', dbFly);
+  await app.syncDefaultExercises();
+  check('a hand-toggled perSide survives the catalog sync',
+    (await app.getRecord('exercises', dbFly.id)).perSide === false);
+  await app.putRecord('exercises', { ...(await app.getRecord('exercises', dbFly.id)), perSide: true, userEdited: false });
+  await app.syncDefaultExercises(); // leave state clean for later tests
 
   // --- A damaged backup must be refused BEFORE the wipe. ---
   // Restore clears every store and then writes, so a file that passes a
@@ -2016,6 +2155,332 @@ check('clearSetting removes it from the cache',
     JSON.stringify(w.extraExercises));
 
   await app.clearStore('workouts');
+}
+
+// ---------------------------------------------------------------------------
+// Apple Fitness (Shortcuts deep link) -- triggerAppleFitnessWorkout(),
+// maybeAutoStartAppleFitness(), and the sessionJustStarted flag both
+// logSetLocked() and startWorkoutSessionLocked() attach to their return
+// value (never persisted -- see the comments in 02-storage.js).
+// ---------------------------------------------------------------------------
+{
+  const cat = await app.getAllRecords('exercises');
+  const curl = cat.find(e => e.name === 'Barbell Curl') || cat[0];
+
+  await app.clearStore('workouts');
+  await app.setSetting('appleFitnessShortcutName', '');
+  await app.setSetting('appleFitnessAutoStart', true);
+  app.location.href = 'file:///x';
+
+  const fired1 = await app.triggerAppleFitnessWorkout();
+  check('triggerAppleFitnessWorkout is a no-op with no shortcut name configured',
+    fired1 === false && app.location.href === 'file:///x');
+
+  await app.setSetting('appleFitnessShortcutName', 'Start Strength Workout');
+  const fired2 = await app.triggerAppleFitnessWorkout();
+  check('triggerAppleFitnessWorkout deep-links to the configured Shortcut by name',
+    fired2 === true && app.location.href === 'shortcuts://run-shortcut?name=Start%20Strength%20Workout',
+    app.location.href);
+
+  app.location.href = 'file:///x';
+  const w1 = await app.logSet(curl.id, 'standard', [{ weight: 20, reps: 10 }], null);
+  check('logSetLocked flags sessionJustStarted the first time a set starts the day',
+    w1.sessionJustStarted === true && w1.startedAuto === true);
+
+  await app.maybeAutoStartAppleFitness(w1);
+  check('maybeAutoStartAppleFitness fires when sessionJustStarted AND the auto-start setting are both true',
+    app.location.href === 'shortcuts://run-shortcut?name=Start%20Strength%20Workout');
+
+  app.location.href = 'file:///x';
+  const w2 = await app.logSet(curl.id, 'standard', [{ weight: 25, reps: 8 }], null);
+  check('a second set the same day is NOT flagged sessionJustStarted', w2.sessionJustStarted === false);
+
+  await app.maybeAutoStartAppleFitness(w2);
+  check('maybeAutoStartAppleFitness does not re-fire once the session has already started',
+    app.location.href === 'file:///x');
+
+  await app.setSetting('appleFitnessAutoStart', false);
+  await app.clearStore('workouts');
+  const w3 = await app.logSet(curl.id, 'standard', [{ weight: 20, reps: 10 }], null);
+  await app.maybeAutoStartAppleFitness(w3);
+  check('the auto-start setting being off suppresses the trigger even on a genuine session start',
+    w3.sessionJustStarted === true && app.location.href === 'file:///x');
+
+  await app.clearStore('workouts');
+  const logged = await app.logSet(curl.id, 'standard', [{ weight: 20, reps: 10 }], null);
+  const startedAgain = await app.startWorkoutSession();
+  check('pressing Start after an auto-started session is NOT a new start ("whichever comes first wins")',
+    startedAgain.sessionJustStarted === false && startedAgain.startedAt === logged.startedAt);
+
+  await app.clearStore('workouts');
+  const freshStart = await app.startWorkoutSession();
+  check('startWorkoutSessionLocked flags sessionJustStarted on a genuine explicit Start',
+    freshStart.sessionJustStarted === true);
+
+  await app.setSetting('appleFitnessShortcutName', '');
+  await app.setSetting('appleFitnessAutoStart', false);
+  await app.clearStore('workouts');
+  app.location.href = 'file:///x';
+}
+
+// ---------------------------------------------------------------------------
+// Plan history: getCurrentPlan()'s activePlanId override and its fallback,
+// plus planHasBeenTrained()'s zero-exercise-workout edge case.
+// ---------------------------------------------------------------------------
+{
+  for (const p of await app.getAllRecords('plans')) await app.deleteRecord('plans', p.id);
+  await app.clearWorkoutHistory();
+  await app.clearSetting('activePlanId');
+
+  const olderId = await app.addRecord('plans', {
+    createdAt: Date.now() - 2000, goal: 'Older', daysPerWeek: 3, equipment: '', notes: '',
+    repRangeMin: 8, repRangeMax: 12, fixedSets: null, days: [{ name: 'A', exercises: [] }]
+  });
+  const newerId = await app.addRecord('plans', {
+    createdAt: Date.now(), goal: 'Newer', daysPerWeek: 3, equipment: '', notes: '',
+    repRangeMin: 8, repRangeMax: 12, fixedSets: null, days: [{ name: 'B', exercises: [] }]
+  });
+
+  check('with no activePlanId set, getCurrentPlan() falls back to newest by createdAt',
+    (await app.getCurrentPlan()).id === newerId);
+
+  await app.setCurrentPlan(olderId);
+  check('activePlanId overrides createdAt-recency', (await app.getCurrentPlan()).id === olderId);
+
+  await app.deleteRecord('plans', olderId);
+  check('an activePlanId pointing at a deleted plan falls back to newest by createdAt',
+    (await app.getCurrentPlan()).id === newerId);
+
+  await app.clearSetting('activePlanId');
+
+  // planHasBeenTrained(): a workout record referencing a plan but logging
+  // zero exercises on it (Start tapped, nothing logged) must NOT count —
+  // same rule the AI variety-prompt lookup this function replaced always
+  // enforced.
+  await app.clearWorkoutHistory();
+  await app.addRecord('workouts', { date: '2026-02-01', ts: Date.now(), planId: newerId, dayIndex: 0, dayName: 'B', exercises: [] });
+  check('a zero-exercise workout does not count as training a plan',
+    app.planHasBeenTrained(newerId, await app.getAllWorkouts()) === false);
+
+  const anyExerciseId = (await app.getAllRecords('exercises'))[0].id;
+  await app.addRecord('workouts', {
+    date: '2026-02-02', ts: Date.now(), planId: newerId, dayIndex: 0, dayName: 'B',
+    exercises: [{ exerciseId: anyExerciseId, sets: [{ weight: 10, reps: 5 }] }]
+  });
+  check('a workout with at least one logged set DOES count as training',
+    app.planHasBeenTrained(newerId, await app.getAllWorkouts()) === true);
+
+  await app.deleteRecord('plans', newerId);
+  await app.clearWorkoutHistory();
+  await app.clearSetting('activePlanId');
+}
+
+// ---------------------------------------------------------------------------
+// Supersets: setPlanPairing() (11-plan.js) and the pure
+// isFirstOfActiveSupersetPair() rest-timer check (09-workout.js).
+// ---------------------------------------------------------------------------
+{
+  const cat = await app.getAllRecords('exercises');
+  const [exA, exB, exC] = cat.slice(0, 3);
+  const planId = await app.addRecord('plans', {
+    createdAt: Date.now(), goal: 'Superset test', daysPerWeek: 3, equipment: '', notes: '',
+    repRangeMin: 8, repRangeMax: 12, fixedSets: null,
+    days: [{ name: 'Day', exercises: [
+      { exerciseId: exA.id, name: exA.name, targetSets: 3, repRangeMin: 8, repRangeMax: 12 },
+      { exerciseId: exB.id, name: exB.name, targetSets: 3, repRangeMin: 8, repRangeMax: 12 },
+      { exerciseId: exC.id, name: exC.name, targetSets: 3, repRangeMin: 8, repRangeMax: 12 },
+    ] }]
+  });
+  const dayOf = async () => (await app.getRecord('plans', planId)).days[0];
+  const slotOf = (day, id) => day.exercises.find(e => e.exerciseId === id);
+
+  await app.setPlanPairing(planId, 0, exA.id, exB.id);
+  let day = await dayOf();
+  check('setPlanPairing sets the link symmetrically',
+    slotOf(day, exA.id).pairedExerciseId === exB.id && slotOf(day, exB.id).pairedExerciseId === exA.id);
+
+  // Re-pairing A with C must free B (A's old partner) on both ends, not
+  // just overwrite A's own field.
+  await app.setPlanPairing(planId, 0, exA.id, exC.id);
+  day = await dayOf();
+  check('re-pairing breaks the OLD partner\'s link too, not just this slot\'s',
+    slotOf(day, exA.id).pairedExerciseId === exC.id
+    && slotOf(day, exC.id).pairedExerciseId === exA.id
+    && slotOf(day, exB.id).pairedExerciseId === undefined);
+
+  // Unpairing (partnerExerciseId: null) clears both sides.
+  await app.setPlanPairing(planId, 0, exA.id, null);
+  day = await dayOf();
+  check('unpairing clears the link on both sides',
+    slotOf(day, exA.id).pairedExerciseId === undefined && slotOf(day, exC.id).pairedExerciseId === undefined);
+
+  // Pure tests of isFirstOfActiveSupersetPair — no store reads, no async.
+  await app.setPlanPairing(planId, 0, exA.id, exB.id);
+  day = await dayOf();
+  check('an unpaired exercise is never "first of a pair"',
+    app.isFirstOfActiveSupersetPair(day, exC.id, {}, true) === false);
+  check('the earlier-in-array side of an active pair, setting on, IS "first"',
+    app.isFirstOfActiveSupersetPair(day, exA.id, {}, true) === true);
+  check('the later-in-array side of the same pair is NOT "first"',
+    app.isFirstOfActiveSupersetPair(day, exB.id, {}, true) === false);
+  check('supersetsEnabled: false suppresses it even though it would otherwise be true',
+    app.isFirstOfActiveSupersetPair(day, exA.id, {}, false) === false);
+  check('a session-only swap on EITHER side of the pair suppresses it',
+    app.isFirstOfActiveSupersetPair(day, exA.id, { [exA.id]: 999 }, true) === false
+    && app.isFirstOfActiveSupersetPair(day, exA.id, { [exB.id]: 999 }, true) === false);
+
+  await app.deleteRecord('plans', planId);
+}
+
+// ---------------------------------------------------------------------------
+// Personal records: checkPersonalRecord() (08-progression.js) — pure, no
+// store reads, so every scenario is built as plain workout/set fixtures.
+// ---------------------------------------------------------------------------
+{
+  const cat = await app.getAllRecords('exercises');
+  const bench = cat.find(e => e.equipment === 'barbell') || cat[0];
+  const assisted = cat.find(e => e.equipment === 'assisted');
+
+  const w = (ts, weight, reps, exId = bench.id) => ({ exercises: [{ exerciseId: exId, sets: [{ ts, entries: [{ weight, reps }] }] }] });
+
+  check('a first-ever logged set is never a PR (nothing to beat)',
+    (() => { const r = app.checkPersonalRecord(bench, [], bench.id, { ts: 1, entries: [{ weight: 60, reps: 8 }] });
+      return r.weightPR === false && r.e1rmPR === false; })());
+
+  {
+    const history = [w(1, 60, 8), w(2, 62.5, 6)];
+    const lighter = { ts: 3, entries: [{ weight: 50, reps: 8 }] };
+    const r = app.checkPersonalRecord(bench, history, bench.id, lighter);
+    check('a lighter set than history is neither a weight nor an est-1RM PR',
+      r.weightPR === false && r.e1rmPR === false);
+  }
+
+  {
+    const history = [w(1, 60, 8), w(2, 62.5, 6)];
+    const heavier = { ts: 3, entries: [{ weight: 65, reps: 5 }] };
+    const r = app.checkPersonalRecord(bench, history, bench.id, heavier);
+    check('a set heavier than any prior set IS a weight PR', r.weightPR === true);
+  }
+
+  {
+    // Same weight as the prior best, but more reps -- beats the prior
+    // est-1RM (62.5 * (1+6/30) = 75) without beating the prior WEIGHT max
+    // (62.5), so only e1rmPR should fire.
+    const history = [w(1, 60, 8), w(2, 62.5, 6)];
+    const sameWeightMoreReps = { ts: 3, entries: [{ weight: 62.5, reps: 10 }] };
+    const r = app.checkPersonalRecord(bench, history, bench.id, sameWeightMoreReps);
+    check('same weight, more reps, clears the prior est-1RM without a new weight max',
+      r.weightPR === false && r.e1rmPR === true);
+  }
+
+  {
+    // Assisted: effectiveLoadKg's sign convention (less assistance = a
+    // larger, "better" number) already makes a plain > comparison correct,
+    // no special-casing needed.
+    const history = [w(1, -30, 8, assisted.id)];
+    const lessAssisted = { ts: 2, entries: [{ weight: -25, reps: 8 }] };
+    const r = app.checkPersonalRecord(assisted, history, assisted.id, lessAssisted);
+    check('an assisted exercise logging LESS assistance is a weight PR',
+      r.weightPR === true, JSON.stringify(r));
+  }
+
+  {
+    // The just-logged set must be excluded from its own "prior best"
+    // comparison by ts, not accidentally counted as its own history.
+    const selfTs = 5;
+    const history = [w(1, 60, 8), { exercises: [{ exerciseId: bench.id, sets: [{ ts: selfTs, entries: [{ weight: 70, reps: 8 }] }] }] }];
+    const newSet = { ts: selfTs, entries: [{ weight: 70, reps: 8 }] };
+    const r = app.checkPersonalRecord(bench, history, bench.id, newSet);
+    check('the just-logged set is excluded from its own prior-best comparison (by ts)',
+      r.weightPR === true);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Birthday-derived age: ageFromBirthday() and currentAge()'s precedence
+// (08-progression.js) — a birthday, once given, is authoritative over the
+// plain numeric age setting, since a manually-typed age is exactly the
+// "goes stale and nobody remembers to update it" bug this exists to fix.
+// ---------------------------------------------------------------------------
+{
+  check('ageFromBirthday: already had this year\'s birthday',
+    app.ageFromBirthday('1990-01-15', '2026-06-01') === 36);
+  check('ageFromBirthday: has NOT yet had this year\'s birthday',
+    app.ageFromBirthday('1990-12-15', '2026-06-01') === 35);
+  check('ageFromBirthday: birthday is exactly today',
+    app.ageFromBirthday('1990-06-01', '2026-06-01') === 36);
+  check('ageFromBirthday: the day before the birthday',
+    app.ageFromBirthday('1990-06-02', '2026-06-01') === 35);
+  check('ageFromBirthday: no birthday given returns null, not 0',
+    app.ageFromBirthday('', '2026-06-01') === null);
+  check('ageFromBirthday: malformed input returns null',
+    app.ageFromBirthday('not-a-date', '2026-06-01') === null);
+
+  await app.clearSetting('birthday');
+  await app.setSetting('age', 45);
+  check('currentAge() falls back to the plain age setting with no birthday on file',
+    app.currentAge() === 45);
+
+  // A birthday landing on exactly today, 30 years ago -- deterministic
+  // regardless of what day the suite actually runs on, unlike a hardcoded
+  // date that would drift wrong near a year boundary.
+  const today = app.todayStr();
+  const thirtyYearsAgo = `${Number(today.slice(0, 4)) - 30}${today.slice(4)}`;
+  await app.setSetting('birthday', thirtyYearsAgo);
+  check('currentAge() prefers the birthday-derived age over a stale manual age',
+    app.currentAge() === 30, `got ${app.currentAge()}`);
+
+  await app.clearSetting('birthday');
+  await app.clearSetting('age');
+}
+
+// ---------------------------------------------------------------------------
+// CSV import + perSide: the Fitbod importer's `multiplier` column already
+// produces the true combined total (see "CSV import" in design-summary.md).
+// For a perSide-flagged exercise, that total must be halved back down to
+// "one side" before storing, so effectiveLoadKg()'s later doubling lands on
+// the same true total instead of doubling an already-doubled number (see
+// "Per-side weight" in design-summary.md). Drives the real two-step UI flow
+// (file-select, then confirm) via the listeners map, the same pattern used
+// elsewhere in this suite for addEventListener-wired controls.
+// ---------------------------------------------------------------------------
+{
+  const perSideExId = await app.addRecord('exercises', {
+    name: 'Test PerSide Row', primaryMuscle: 'lats', secondaryMuscles: [],
+    equipment: 'dumbbell', custom: true, perSide: true
+  });
+  const plainExId = await app.addRecord('exercises', {
+    name: 'Test Plain Row', primaryMuscle: 'lats', secondaryMuscles: [],
+    equipment: 'dumbbell', custom: true
+  });
+
+  const csv = [
+    'Date,Exercise,Reps,Weight(kg),isWarmup,multiplier',
+    '2026-01-01T10:00:00+0000,Test PerSide Row,8,20,false,2',
+    '2026-01-01T10:00:00+0000,Test Plain Row,8,20,false,2',
+  ].join('\n');
+
+  const fileInputListener = listeners.get('import-file');
+  await fileInputListener.change({ target: { files: [{ text: async () => csv }] } });
+
+  const confirmListener = listeners.get('import-confirm-btn');
+  await confirmListener.click();
+
+  const imported = await app.getWorkoutForDate('2026-01-01');
+  const perSideEntry = imported.exercises.find(e => e.exerciseId === perSideExId);
+  const plainEntry = imported.exercises.find(e => e.exerciseId === plainExId);
+  check('a perSide exercise stores HALF the file\'s true total (one side), not the full total',
+    perSideEntry.sets[0].entries[0].weight === 20,
+    JSON.stringify(perSideEntry && perSideEntry.sets));
+  check('a plain exercise stores the file\'s true total unchanged (existing behavior)',
+    plainEntry.sets[0].entries[0].weight === 40,
+    JSON.stringify(plainEntry && plainEntry.sets));
+  check('the perSide exercise\'s stored (halved) weight round-trips back to the true total via effectiveLoadKg',
+    app.effectiveLoadKg({ perSide: true }, perSideEntry.sets[0].entries[0].weight) === 40);
+
+  await app.clearWorkoutHistory();
+  await app.deleteRecord('exercises', perSideExId);
+  await app.deleteRecord('exercises', plainExId);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

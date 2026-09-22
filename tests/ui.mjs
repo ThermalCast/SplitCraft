@@ -224,6 +224,33 @@ await fireAction('set-equipment', () => registries.EXERCISE_MANAGER_CHANGE_ACTIO
   const ex = await app.getRecord('exercises', otherExId);
   check('set-equipment actually changed the store', ex.equipment === 'dumbbell', ex.equipment);
 }
+await fireAction('toggle-per-side', () => {
+  const stub = actionStub({ exid: String(otherExId) });
+  stub.checked = true;
+  return registries.EXERCISE_MANAGER_CHANGE_ACTIONS['toggle-per-side'](stub);
+});
+{
+  const ex = await app.getRecord('exercises', otherExId);
+  check('toggle-per-side actually changed the store', ex.perSide === true && ex.userEdited === true);
+}
+{
+  // The reminder tag shows up wherever a weight gets typed for a perSide
+  // exercise: the drop/myo modal (per-row createElement, so checked via the
+  // row's own innerHTML, not the container's -- appendChild doesn't update
+  // a stub's innerHTML) and the active-workout card (a single innerHTML
+  // string, checked directly).
+  await fireAction('open-drop-myo (per-side)', () => registries.WORKOUT_CLICK_ACTIONS['open-drop-myo'](actionStub({ exid: String(otherExId) })));
+  const rows = app.document.getElementById('dropmyo-rows-container').children;
+  check('the drop/myo modal shows the per-side reminder for a perSide exercise',
+    rows.some(c => c.innerHTML && c.innerHTML.includes('per-side-note')));
+
+  await app.addExtraExercise(otherExId, 3, 8, 12);
+  await app.refreshLogAndHistory();
+  check('the active-workout card shows the per-side reminder for a perSide exercise',
+    app.document.getElementById('active-workout-list').innerHTML.includes('per-side-note'));
+  await app.removeExtraExercise(otherExId);
+  await app.refreshLogAndHistory();
+}
 await fireAction('pin', () => registries.EXERCISE_MANAGER_CLICK_ACTIONS['pin'](actionStub({ exid: String(otherExId) })));
 {
   const pref = await app.getExercisePref(otherExId);
@@ -231,6 +258,40 @@ await fireAction('pin', () => registries.EXERCISE_MANAGER_CLICK_ACTIONS['pin'](a
 }
 await fireAction('like', () => registries.EXERCISE_MANAGER_CLICK_ACTIONS['like'](actionStub({ exid: String(otherExId) })));
 await fireAction('dislike', () => registries.EXERCISE_MANAGER_CLICK_ACTIONS['dislike'](actionStub({ exid: String(otherExId) })));
+
+// pin/like/dislike must ALL invalidate the shared exercise-picker cache, not
+// just dislike itself -- pin and like each clear `disliked` too, and a stale
+// cache would keep a just-un-disliked exercise hidden from Swap/Add Exercise.
+{
+  await app.setExercisePref(otherExId, { pinned: false, liked: false, disliked: false });
+  app.invalidateExercisePicker();
+  let grouped = await app.groupedExercisesForPicker();
+  check('the picker includes the exercise before it is disliked',
+    grouped.some(g => g.exercises.some(e => e.id === otherExId)));
+
+  await fireAction('dislike (picker cache)', () => registries.EXERCISE_MANAGER_CLICK_ACTIONS['dislike'](actionStub({ exid: String(otherExId) })));
+  grouped = await app.groupedExercisesForPicker(); // must rebuild, not reuse the cache warmed above
+  check('dislike invalidates the picker cache -- the exercise disappears without an explicit rebuild',
+    !grouped.some(g => g.exercises.some(e => e.id === otherExId)),
+    JSON.stringify(grouped.flatMap(g => g.exercises.map(e => e.id))));
+
+  await fireAction('pin (undislike, picker cache)', () => registries.EXERCISE_MANAGER_CLICK_ACTIONS['pin'](actionStub({ exid: String(otherExId) })));
+  grouped = await app.groupedExercisesForPicker();
+  check('pinning a disliked exercise un-dislikes it AND invalidates the picker cache',
+    grouped.some(g => g.exercises.some(e => e.id === otherExId)),
+    JSON.stringify(grouped.flatMap(g => g.exercises.map(e => e.id))));
+
+  await fireAction('dislike (re-arm)', () => registries.EXERCISE_MANAGER_CLICK_ACTIONS['dislike'](actionStub({ exid: String(otherExId) })));
+  grouped = await app.groupedExercisesForPicker();
+  await fireAction('like (undislike, picker cache)', () => registries.EXERCISE_MANAGER_CLICK_ACTIONS['like'](actionStub({ exid: String(otherExId) })));
+  grouped = await app.groupedExercisesForPicker();
+  check('liking a disliked exercise un-dislikes it AND invalidates the picker cache',
+    grouped.some(g => g.exercises.some(e => e.id === otherExId)),
+    JSON.stringify(grouped.flatMap(g => g.exercises.map(e => e.id))));
+
+  await app.setExercisePref(otherExId, { pinned: false, liked: false, disliked: false });
+  app.invalidateExercisePicker();
+}
 
 // --- WORKOUT_* (09-workout.js) — needs renderActiveWorkout's context; a
 // refresh right before this block guarantees activeWorkoutCtx is current. --
@@ -369,6 +430,251 @@ await app.refreshPlanTab();
   const updatedPlan = await app.getRecord('plans', plan.id);
   const stillHasOld = updatedPlan.days[0].exercises.some(e => e.exerciseId === dayExId);
   check('plan-swap-open -> pick-exercise actually rewrote the plan day', !stillHasOld);
+}
+
+// --- plan-swap-open must exclude every exercise already in the day, not
+// just the slot being replaced -- two slots sharing one exerciseId would
+// break setPlanPairing()'s "always unambiguous" invariant (see "Supersets"
+// below), among everything else already keyed by exerciseId. Its own
+// throwaway plan, since the shared `plan` fixture above has already had its
+// day-0 composition rewritten by the swap test just above. ---------------
+{
+  const cat = await app.getAllRecords('exercises');
+  const [exA, exB, exC] = cat.slice(0, 3);
+  const swapPlanId = await app.addRecord('plans', {
+    createdAt: Date.now(), goal: 'Swap exclude test', daysPerWeek: 3, equipment: '', notes: '',
+    repRangeMin: 8, repRangeMax: 12, fixedSets: null,
+    days: [{ name: 'Day', exercises: [
+      { exerciseId: exA.id, name: exA.name, targetSets: 3, repRangeMin: 8, repRangeMax: 12 },
+      { exerciseId: exB.id, name: exB.name, targetSets: 3, repRangeMin: 8, repRangeMax: 12 },
+    ] }]
+  });
+  await fireAction('plan-swap-open (exclude check)', () => registries.PLAN_DAY_CLICK_ACTIONS['plan-swap-open'](
+    actionStub({ exid: String(exA.id), planid: String(swapPlanId), dayidx: '0' })
+  ));
+  const pickerHtml = app.document.getElementById('exercise-picker-body').innerHTML;
+  check('the swap picker excludes an exercise already elsewhere in the day (exB), not just the slot being replaced (exA)',
+    !pickerHtml.includes(`data-exid="${exB.id}"`));
+  check('the swap picker still offers an unrelated exercise (exC)',
+    pickerHtml.includes(`data-exid="${exC.id}"`));
+
+  app.document.getElementById('exercise-picker-modal').hidden = true;
+  await app.deleteRecord('plans', swapPlanId);
+}
+
+// --- Supersets (11-plan.js's setPlanPairing/Plan tab UI, and the
+// rest-timer exception in WORKOUT_CLICK_ACTIONS['log-set']) ----------------
+// Uses its own throwaway plan rather than the shared `plan`/`day0` fixture
+// above — the plan-swap-open test just replaced dayExId's slot with
+// otherExId, so reusing those ids here would mean testing against exercise
+// ids that no longer occupy the slots this block thinks they do.
+{
+  const originalCurrent = await app.getCurrentPlan();
+  const cat = await app.getAllRecords('exercises');
+  const [exA, exB, exC] = cat.slice(0, 3);
+  const supersetPlanId = await app.addRecord('plans', {
+    createdAt: Date.now(), goal: 'Superset UI test', daysPerWeek: 3, equipment: '', notes: '',
+    repRangeMin: 8, repRangeMax: 12, fixedSets: null,
+    days: [{ name: 'Day', exercises: [
+      { exerciseId: exA.id, name: exA.name, targetSets: 3, repRangeMin: 8, repRangeMax: 12 },
+      { exerciseId: exB.id, name: exB.name, targetSets: 3, repRangeMin: 8, repRangeMax: 12 },
+    ] }]
+  });
+  await app.setCurrentPlan(supersetPlanId);
+  await app.setSetting('restTimerEnabled', true);
+  await app.setSetting('supersetsEnabled', true);
+  app.selectedLogDayIdx = null; // force fresh auto-selection against the new (single-day) plan
+
+  await app.refreshPlanTab();
+  const pairSelect = actionStub({ exid: String(exA.id), planid: String(supersetPlanId), dayidx: '0' }, String(exB.id));
+  await fireAction('plan-pair-select', () => registries.PLAN_DAY_CHANGE_ACTIONS['plan-pair-select'](pairSelect));
+  let freshPlan = await app.getRecord('plans', supersetPlanId);
+  check('plan-pair-select paired the two exercises symmetrically',
+    freshPlan.days[0].exercises[0].pairedExerciseId === exB.id
+    && freshPlan.days[0].exercises[1].pairedExerciseId === exA.id);
+  check('the Plan tab shows the "Paired with" tag once paired',
+    app.document.getElementById('plan-day-overview').innerHTML.includes('Paired with'));
+
+  await app.refreshLogAndHistory();
+  check('the active-workout card shows the superset tag with the setting on',
+    app.document.getElementById('active-workout-list').innerHTML.includes('Superset with'));
+
+  // First of the pair (array order: exA before exB) must skip the rest
+  // timer entirely — observable via #timer-row's hidden state, exactly what
+  // hideTimerSheet()/showTimerSheet() (04-timer.js) toggle.
+  const firstGroup = actionStub({ exid: String(exA.id), origExid: String(exA.id), target: '3' });
+  firstGroup.querySelector = (sel) => sel === '.plan-log-weight' ? actionStub({}, '60') : sel === '.plan-log-reps' ? actionStub({}, '8') : actionStub();
+  const firstLogBtn = actionStub(); firstLogBtn.closest = () => firstGroup;
+  await fireAction('log-set (first of pair)', () => registries.WORKOUT_CLICK_ACTIONS['log-set'](firstLogBtn));
+  check('logging the FIRST exercise of an active pair suppresses the rest timer',
+    app.document.getElementById('timer-row').hidden === true);
+
+  // Second of the pair follows shouldRestAfter() exactly as before this
+  // feature existed — one set logged against a target of 3 is not the
+  // completing set, so a rest SHOULD start.
+  const secondGroup = actionStub({ exid: String(exB.id), origExid: String(exB.id), target: '3' });
+  secondGroup.querySelector = (sel) => sel === '.plan-log-weight' ? actionStub({}, '40') : sel === '.plan-log-reps' ? actionStub({}, '8') : actionStub();
+  const secondLogBtn = actionStub(); secondLogBtn.closest = () => secondGroup;
+  await fireAction('log-set (second of pair)', () => registries.WORKOUT_CLICK_ACTIONS['log-set'](secondLogBtn));
+  check('logging the SECOND exercise of the pair rests normally',
+    app.document.getElementById('timer-row').hidden === false);
+
+  // The off switch suppresses both the tag and the rest exception without
+  // touching pairedExerciseId on either slot.
+  await app.setSetting('supersetsEnabled', false);
+  await app.refreshLogAndHistory();
+  check('turning supersetsEnabled off removes the tag',
+    !app.document.getElementById('active-workout-list').innerHTML.includes('Superset with'));
+  const stillPaired = await app.getRecord('plans', supersetPlanId);
+  check('...without altering pairedExerciseId on either slot',
+    stillPaired.days[0].exercises[0].pairedExerciseId === exB.id);
+
+  await app.setSetting('supersetsEnabled', true);
+  await app.refreshLogAndHistory();
+  check('turning it back on immediately restores the tag with nothing to reconfigure',
+    app.document.getElementById('active-workout-list').innerHTML.includes('Superset with'));
+
+  // Swapping a paired exercise clears the pairing on the OTHER (untouched)
+  // side too and falls back to normal (no tag).
+  await fireAction('plan-swap-open (paired exercise)', () => registries.PLAN_DAY_CLICK_ACTIONS['plan-swap-open'](
+    actionStub({ exid: String(exA.id), planid: String(supersetPlanId), dayidx: '0' })
+  ));
+  await fireAction('pick-exercise (breaks the pairing)', () => registries.EXERCISE_PICKER_ACTIONS['pick-exercise'](actionStub({ exid: String(exC.id) })));
+  const afterSwapPlan = await app.getRecord('plans', supersetPlanId);
+  check('swapping a paired exercise clears the pairing on the OTHER (untouched) side too',
+    afterSwapPlan.days[0].exercises.find(e => e.exerciseId === exB.id).pairedExerciseId === undefined);
+  await app.refreshLogAndHistory();
+  check('after the swap, no pairing tag renders',
+    !app.document.getElementById('active-workout-list').innerHTML.includes('Superset with'));
+
+  // Clean up: restore the original current plan for anything after this block.
+  await app.setCurrentPlan(originalCurrent.id);
+  await app.deleteRecord('plans', supersetPlanId);
+  app.selectedLogDayIdx = null;
+  await app.refreshLogAndHistory();
+}
+
+// --- Personal records (announcePersonalRecord(), 09-workout.js) ------------
+// dayExId ("Barbell Bench Press") has real logged history from
+// seedDemoData. Weights below are deliberately extreme (300 / 1) so the
+// comparison is unambiguous regardless of the current display unit
+// (kg vs lb) — the point is "obviously heavier/lighter than any realistic
+// prior set," not a precise value.
+{
+  await app.refreshLogAndHistory();
+  const toastHost = app.document.getElementById('toast-host');
+  const hasNewBestToast = (fromIndex) =>
+    toastHost.children.slice(fromIndex).some(t => typeof t.textContent === 'string' && t.textContent.includes('New best'));
+
+  const beforePR = toastHost.children.length;
+  const heavyGroup = actionStub({ exid: String(dayExId), origExid: String(dayExId), target: '3' });
+  heavyGroup.querySelector = (sel) => sel === '.plan-log-weight' ? actionStub({}, '300') : sel === '.plan-log-reps' ? actionStub({}, '5') : actionStub();
+  const heavyLogBtn = actionStub(); heavyLogBtn.closest = () => heavyGroup;
+  await fireAction('log-set (PR weight)', () => registries.WORKOUT_CLICK_ACTIONS['log-set'](heavyLogBtn));
+  check('logging a clearly heavier set produces a "New best" toast', hasNewBestToast(beforePR));
+
+  const beforeNonPR = toastHost.children.length;
+  const lightGroup = actionStub({ exid: String(dayExId), origExid: String(dayExId), target: '3' });
+  lightGroup.querySelector = (sel) => sel === '.plan-log-weight' ? actionStub({}, '1') : sel === '.plan-log-reps' ? actionStub({}, '5') : actionStub();
+  const lightLogBtn = actionStub(); lightLogBtn.closest = () => lightGroup;
+  await fireAction('log-set (not a PR)', () => registries.WORKOUT_CLICK_ACTIONS['log-set'](lightLogBtn));
+  check('logging a lighter set produces no PR toast', !hasNewBestToast(beforeNonPR));
+}
+
+// --- Plan history (11-plan.js's renderPlanHistory / setCurrentPlan) --------
+{
+  const before = await app.getCurrentPlan();
+  // Pinned explicitly rather than relying on createdAt ordering against the
+  // fixture below — activePlanId is the actual mechanism that decides
+  // "current" now, and leaving it to timestamp comparison would make this
+  // test racy.
+  await app.setCurrentPlan(before.id);
+  const someExercise = (await app.getAllRecords('exercises'))[0];
+  const pastPlanId = await app.addRecord('plans', {
+    createdAt: Date.now() - 5000, goal: 'Old Goal', daysPerWeek: 3, equipment: '', notes: '',
+    repRangeMin: 8, repRangeMax: 12, fixedSets: null,
+    days: [{ name: 'Old Day', exercises: [{ exerciseId: someExercise.id, name: someExercise.name, targetSets: 3, repRangeMin: 8, repRangeMax: 12 }] }]
+  });
+  // Trained, so this fixture reads as real history — renderPlanHistory()
+  // itself doesn't filter by training (pruning only ever runs inside
+  // generatePlanWithAI()), but this matches what a genuine entry looks like.
+  const pastWorkoutId = await app.addRecord('workouts', {
+    date: '2020-01-01', ts: Date.now(), planId: pastPlanId, dayIndex: 0, dayName: 'Old Day',
+    exercises: [{ exerciseId: someExercise.id, sets: [{ weight: 10, reps: 5 }] }]
+  });
+
+  await app.refreshPlanTab();
+  const historyDetails = app.document.getElementById('plan-history-disclosure');
+  check('renderPlanHistory shows the disclosure once a past (non-current) plan exists',
+    historyDetails.hidden === false);
+  check('renderPlanHistory\'s summary counts exactly the one past plan',
+    app.document.getElementById('plan-history-summary').textContent === 'Past plans (1)',
+    app.document.getElementById('plan-history-summary').textContent);
+  check('renderPlanHistory lists the past plan\'s goal',
+    app.document.getElementById('plan-history-list').innerHTML.includes('Old Goal'));
+
+  await fireAction('make-plan-active', () => registries.PLAN_HISTORY_ACTIONS['make-plan-active'](actionStub({ planid: String(pastPlanId) })));
+  const nowCurrent = await app.getCurrentPlan();
+  check('make-plan-active switches getCurrentPlan() to the selected past plan', nowCurrent.id === pastPlanId);
+
+  // Clean up: restore the original current plan and remove the fixture.
+  await app.setCurrentPlan(before.id);
+  await app.deleteRecord('workouts', pastWorkoutId);
+  await app.deleteRecord('plans', pastPlanId);
+  await app.refreshPlanTab();
+  check('the disclosure hides itself again once no past plan remains',
+    app.document.getElementById('plan-history-disclosure').hidden === true);
+}
+
+// --- Apple Fitness button visibility (04-timer.js's refreshSessionCard) ----
+{
+  await app.setSetting('appleFitnessShortcutName', '');
+  await app.refreshSessionCard();
+  check('the Apple Fitness button is absent with no shortcut name configured',
+    app.document.getElementById('apple-fitness-btn').style.display === 'none');
+
+  await app.setSetting('appleFitnessShortcutName', 'Start Strength Workout');
+  await app.refreshSessionCard();
+  check('the Apple Fitness button appears once a shortcut name is configured',
+    app.document.getElementById('apple-fitness-btn').style.display === 'block');
+
+  app.location.href = 'file:///x';
+  await fireAction('apple-fitness-btn', () => listeners.get('apple-fitness-btn').click({ target: {} }));
+  check('clicking the Apple Fitness button fires the Shortcuts deep link',
+    app.location.href === 'shortcuts://run-shortcut?name=Start%20Strength%20Workout', app.location.href);
+
+  await app.setSetting('appleFitnessShortcutName', '');
+  app.location.href = 'file:///x';
+}
+
+// --- Birthday-derived age (07-settings.js's refreshAgeFromBirthday) --------
+{
+  const ageInput = app.document.getElementById('setting-age');
+  const birthdayInput = app.document.getElementById('setting-birthday');
+  const birthdayListener = listeners.get('setting-birthday');
+
+  await app.clearSetting('birthday');
+  await app.setSetting('age', 50);
+  await app.loadSettingsIntoForm();
+  check('with no birthday, the Age field is editable and shows the stored value',
+    ageInput.disabled === false && ageInput.value === 50, `disabled=${ageInput.disabled} value=${ageInput.value}`);
+
+  const today = app.todayStr();
+  const twentyFiveYearsAgo = `${Number(today.slice(0, 4)) - 25}${today.slice(4)}`;
+  birthdayInput.value = twentyFiveYearsAgo;
+  await fireAction('setting-birthday change', () => birthdayListener.change({ target: birthdayInput }));
+  check('setting a birthday disables the Age field and auto-fills the derived value',
+    ageInput.disabled === true && ageInput.value === 25,
+    `disabled=${ageInput.disabled} value=${ageInput.value}`);
+
+  birthdayInput.value = '';
+  await fireAction('setting-birthday change (cleared)', () => birthdayListener.change({ target: birthdayInput }));
+  check('clearing the birthday re-enables manual age entry', ageInput.disabled === false);
+  check('clearing the birthday restores the field to the STORED age, not the stale derived one',
+    ageInput.value === 50, `value=${ageInput.value}`);
+
+  await app.clearSetting('birthday');
+  await app.clearSetting('age');
 }
 
 console.log(`\nregistry actions fired: ${actionsFired}, failures: ${actionsFailed}`);

@@ -39,6 +39,21 @@
       await refreshLogAndHistory();
       await refreshPlanTab();
     },
+    // Whether a logged weight is per implement (true — a dumbbell in each
+    // hand, moved together) or the real total already (false/absent — see
+    // effectiveLoadKg(), 08-progression.js). Same userEdited/refresh
+    // pattern as set-equipment: it feeds the same progression math, so the
+    // Log/Plan suggestion is stale the moment this changes.
+    'toggle-per-side': async (el) => {
+      const exerciseId = Number(el.dataset.exid);
+      const ex = await getRecord('exercises', exerciseId);
+      if (!ex) return;
+      ex.perSide = el.checked;
+      ex.userEdited = true;
+      await putRecord('exercises', ex);
+      await refreshLogAndHistory();
+      await refreshPlanTab();
+    },
   };
   // Which row(s) are expanded, same pattern as `expandedExercises` in
   // 09-workout.js — a plain module-level Set survives the re-render a
@@ -58,12 +73,17 @@
       }
       await renderExerciseManager();
     },
+    // The exercise picker filters out disliked exercises, so every one of
+    // pin/like/dislike needs invalidateExercisePicker() below — pin and like
+    // both clear `disliked` too (mutually exclusive with it), not just the
+    // dislike toggle itself.
     'pin': async (el) => {
       const exerciseId = Number(el.dataset.exid);
       const pref = await getExercisePref(exerciseId);
       const willPin = !(pref && pref.pinned);
       await setExercisePref(exerciseId, { pinned: willPin, disliked: willPin ? false : (pref ? pref.disliked : false) });
       await renderExerciseManager();
+      invalidateExercisePicker();
     },
     'like': async (el) => {
       const exerciseId = Number(el.dataset.exid);
@@ -71,6 +91,7 @@
       const willLike = !(pref && pref.liked);
       await setExercisePref(exerciseId, { liked: willLike, disliked: false });
       await renderExerciseManager();
+      invalidateExercisePicker();
     },
     'dislike': async (el) => {
       const exerciseId = Number(el.dataset.exid);
@@ -78,9 +99,6 @@
       const willDislike = !(pref && pref.disliked);
       await setExercisePref(exerciseId, { disliked: willDislike, liked: false, pinned: willDislike ? false : (pref ? pref.pinned : false) });
       await renderExerciseManager();
-      // The exercise picker filters out disliked exercises — either
-      // direction of this toggle changes that filtered set, same as a
-      // muscle reassignment does above.
       invalidateExercisePicker();
     },
   };
@@ -130,6 +148,10 @@
           <select class="ex-equip-select" data-exid="${ex.id}" data-action="set-equipment" title="Equipment — sets the smallest weight jump this exercise can advance by">
             ${EQUIPMENT.map(q => `<option value="${q.id}" ${q.id === exerciseEquipment(ex) ? 'selected' : ''}>${esc(q.name)}</option>`).join('')}
           </select>
+          <label class="ex-perside-label" title="Turn on if the logged weight is ONE implement (e.g. one dumbbell) while both move together — the app then treats the real load as double what's logged.">
+            <input type="checkbox" data-exid="${ex.id}" data-action="toggle-per-side" ${ex.perSide ? 'checked' : ''}>
+            per side
+          </label>
           <button class="pref-btn pin-btn ${pref.pinned ? 'active' : ''}" data-exid="${ex.id}" data-action="pin" title="Pin — always include this exercise whenever its muscle is trained in a generated plan">📌</button>
           <button class="pref-btn like-btn ${pref.liked ? 'active' : ''}" data-exid="${ex.id}" data-action="like" title="Like — AI prefers including this exercise">👍</button>
           <button class="pref-btn dislike-btn ${pref.disliked ? 'active' : ''}" data-exid="${ex.id}" data-action="dislike" title="Dislike — never suggested by AI">👎</button>
@@ -458,7 +480,17 @@
             clearedKeys.add(`${localDate}|${exRecord.id}`);
           }
           exInfo.sets.forEach(s => {
-            workoutExEntry.sets.push({ ts: s.ts, type: 'standard', entries: [{ weight: s.weight, reps: s.reps }] });
+            // `s.weight` (parseFitbodCSV()'s effectiveWeight) is ALREADY the
+            // true combined total — the file's own multiplier column just
+            // did that doubling. If this row resolved to a perSide exercise
+            // (a curated catalog default, e.g. Dumbbell Bench Press, or a
+            // manually-toggled custom one), effectiveLoadKg() will double
+            // whatever gets stored here a SECOND time at read time. Halve it
+            // back down to "one side" so the two doublings cancel out and
+            // both land on the same true total, whether the exercise's
+            // history came from hand-entry or this import.
+            const storedWeight = exRecord.perSide ? Math.round((s.weight / 2) * 100) / 100 : s.weight;
+            workoutExEntry.sets.push({ ts: s.ts, type: 'standard', entries: [{ weight: storedWeight, reps: s.reps }] });
             importedSets++;
           });
         }

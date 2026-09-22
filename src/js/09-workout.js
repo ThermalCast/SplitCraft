@@ -162,12 +162,17 @@
   // exactly, just entered here instead of a top-level form.
   // =========================================================================
   let dropMyoExerciseId = null;
+  // The full exercise record, not just its id — renderDropMyoRows() needs
+  // it for the per-side reminder (perSideNoteHtml()) without a store fetch
+  // of its own, since the caller (open-drop-myo below) already has it.
+  let dropMyoExercise = null;
   let dropMyoEntries = [{ weight: '', reps: '' }];
 
-  function openDropMyoModal(exerciseId, exerciseName) {
+  function openDropMyoModal(exerciseId, exercise) {
     dropMyoExerciseId = exerciseId;
+    dropMyoExercise = exercise || null;
     dropMyoEntries = [{ weight: '', reps: '' }];
-    document.getElementById('dropmyo-modal-title').textContent = `Log a drop set or myo reps — ${exerciseName}`;
+    document.getElementById('dropmyo-modal-title').textContent = `Log a drop set or myo reps — ${exercise ? exercise.name : 'this exercise'}`;
     document.getElementById('dropmyo-type').value = 'drop';
     renderDropMyoRows();
     document.getElementById('dropmyo-modal').hidden = false;
@@ -175,6 +180,7 @@
   function closeDropMyoModal() {
     document.getElementById('dropmyo-modal').hidden = true;
     dropMyoExerciseId = null;
+    dropMyoExercise = null;
   }
 
   // Click actions for #dropmyo-rows-container: remove one entry row, or flip
@@ -200,6 +206,7 @@
       row.innerHTML = `
         <button type="button" class="sign-btn${negative ? ' negative' : ''}" data-action="toggle-sign" title="Toggle negative — for assisted reps, enter how much weight is taken off you">±</button>
         <input type="number" inputmode="decimal" step="0.5" placeholder="Weight (${weightUnit})" value="${entry.weight}" data-idx="${i}" data-field="weight" data-action="sync-dropmyo-entry">
+        ${perSideNoteHtml(dropMyoExercise)}
         <input type="number" inputmode="numeric" step="1" min="1" placeholder="Reps" value="${entry.reps}" data-idx="${i}" data-field="reps" data-action="sync-dropmyo-entry" class="entry-reps">
         ${dropMyoEntries.length > 1 ? `<button type="button" class="rm" data-idx="${i}" data-action="remove-dropmyo-entry">×</button>` : ''}
       `;
@@ -228,13 +235,15 @@
     const entries = dropMyoEntries.map(en => ({ weight: toKg(parseFloat(en.weight)), reps: parseInt(en.reps, 10) }));
     if (entries.some(en => isNaN(en.weight) || isNaN(en.reps))) return;
     const workout = await logSet(exerciseId, type, entries, null);
+    const logged = workout.exercises.find(e => e.exerciseId === exerciseId);
     if (await getSetting('rirPromptEnabled', true)) {
-      const logged = workout.exercises.find(e => e.exerciseId === exerciseId);
       if (logged) showRirPrompt({ workoutId: workout.id, exerciseId, setIndex: logged.sets.length - 1, setTs: logged.sets[logged.sets.length - 1].ts });
     }
+    if (logged) await announcePersonalRecord(exerciseId, activeWorkoutCtx.exercisesById[exerciseId], activeWorkoutCtx.allWorkouts, logged.sets[logged.sets.length - 1]);
     closeDropMyoModal();
     startRestTimer();
     await refreshLogAndHistory();
+    await maybeAutoStartAppleFitness(workout);
   });
 
   // Every previous session for one exercise, for the Log tab's per-exercise
@@ -309,6 +318,50 @@
   // picker that needed its own open-state tracked here.
   const openHistoryPanels = new Set();
 
+  // Whether logging a set for `origExerciseId` (the PLAN SLOT's own,
+  // pre-swap identity — what a pairing is stored against, see
+  // setPlanPairing() in 11-plan.js) should skip the rest timer because it's
+  // the FIRST exercise of an active superset pair, not the second. Pure and
+  // synchronous — no store reads — so the log-set handler below and a direct
+  // unit test work from the same plain inputs. "First" is array order in
+  // `day.exercises`, not a stored role, since the pairing itself is already
+  // symmetric (either side names the other) and the plan's own exercise
+  // order is what the lifter actually sees top to bottom on the Plan tab.
+  function isFirstOfActiveSupersetPair(day, origExerciseId, exerciseSwaps, supersetsEnabled) {
+    if (!supersetsEnabled) return false;
+    const slot = day.exercises.find(e => e.exerciseId === origExerciseId);
+    if (!slot || slot.pairedExerciseId == null) return false;
+    const swaps = exerciseSwaps || {};
+    if (swaps[origExerciseId] != null || swaps[slot.pairedExerciseId] != null) return false;
+    const selfIdx = day.exercises.findIndex(e => e.exerciseId === origExerciseId);
+    const partnerIdx = day.exercises.findIndex(e => e.exerciseId === slot.pairedExerciseId);
+    return selfIdx < partnerIdx;
+  }
+
+  // Checks whether the set just logged is a new all-time best for this
+  // exercise (checkPersonalRecord(), 08-progression.js) and toasts if so.
+  // Shared by both places a set gets logged — the plan-driven Log button
+  // below and the drop/myo modal — so the announcement can't drift between
+  // the two paths. A no-op for a first-ever logged set (nothing to beat) or
+  // one that doesn't clear the prior best.
+  //
+  // Takes `exercise`/`allWorkouts` rather than fetching them, reusing
+  // activeWorkoutCtx's already-loaded (whole-catalog, whole-history)
+  // snapshots at both call sites instead of a fresh full-store read on
+  // every single logged set — the hottest path in the app. That snapshot
+  // predates the set just logged, but checkPersonalRecord() already
+  // excludes it from the comparison by its own `ts`, so a "stale" (i.e.
+  // pre-this-set) snapshot is exactly what the comparison wants anyway.
+  async function announcePersonalRecord(exerciseId, exercise, allWorkouts, newSet) {
+    if (!exercise) return;
+    const pr = checkPersonalRecord(exercise, allWorkouts, exerciseId, newSet);
+    if (pr.weightPR) {
+      toast(`🏆 New best: ${displayWeight(pr.newLoad)}${weightUnit} — ${exercise.name}`, 'ok', { duration: 3000 });
+    } else if (pr.e1rmPR) {
+      toast(`🏆 New estimated 1RM — ${exercise.name}`, 'ok', { duration: 3000 });
+    }
+  }
+
   const WORKOUT_CLICK_ACTIONS = {
     'log-set': async (el) => {
       if (el.disabled) return;
@@ -318,6 +371,7 @@
       const rInput = group.querySelector('.plan-log-reps');
       if (!wInput || !rInput) return;
       const exerciseId = Number(group.dataset.exid);
+      const origExerciseId = Number(group.dataset.origExid);
       const weight = parseFloat(wInput.value);
       const reps = parseInt(rInput.value, 10);
       if (isNaN(weight) || isNaN(reps)) return;
@@ -347,9 +401,18 @@
         if (logged && done >= prescribed && await getSetting('rirPromptEnabled', true)) {
           showRirPrompt({ workoutId: workout.id, exerciseId, setIndex: done - 1, setTs: logged.sets[done - 1].ts });
         }
-        if (shouldRestAfter(done, prescribed)) startRestTimer(); else hideTimerSheet();
+        if (logged) await announcePersonalRecord(exerciseId, activeWorkoutCtx.exercisesById[exerciseId], activeWorkoutCtx.allWorkouts, logged.sets[done - 1]);
+        // A superset's first exercise never rests -- move straight to the
+        // partner, whatever shouldRestAfter() would otherwise say. The
+        // second (or an unpaired exercise, or the setting being off) is
+        // unchanged.
+        const supersetsOn = await getSetting('supersetsEnabled', true);
+        if (isFirstOfActiveSupersetPair(day, origExerciseId, workout.exerciseSwaps, supersetsOn)) hideTimerSheet();
+        else if (shouldRestAfter(done, prescribed)) startRestTimer();
+        else hideTimerSheet();
         revealNextOnRender = true;
         await refreshLogAndHistory();
+        await maybeAutoStartAppleFitness(workout);
       } finally {
         el.disabled = false;
       }
@@ -426,7 +489,7 @@
       if (!group) return;
       const exerciseId = Number(group.dataset.exid);
       const rec = activeWorkoutCtx.exercisesById[exerciseId];
-      openDropMyoModal(exerciseId, rec ? rec.name : 'this exercise');
+      openDropMyoModal(exerciseId, rec);
     },
     'adjust-sets': async (el) => {
       const group = el.closest('.exercise-group');
@@ -503,6 +566,11 @@
     // See the comment on activeWorkoutCtx's declaration above.
     activeWorkoutCtx = { plan, dayIdx, day, today, allWorkouts, exercisesById };
     const todayWorkout = allWorkouts.find(w => w.date === today) || null;
+    // Read once for the whole render — the off switch (Settings → Workout)
+    // gates both the pairing tag below and the rest-timer exception in
+    // WORKOUT_CLICK_ACTIONS['log-set'], and both need to agree on it for the
+    // same render/tap.
+    const supersetsOn = await getSetting('supersetsEnabled', true);
 
     // Builds one exercise-group card. `slot` mirrors a plan day's exercise
     // shape ({exerciseId, name, targetSets, repRangeMin, repRangeMax})
@@ -532,6 +600,18 @@
       const isOverridden = overrideVal != null;
       const isComplete = doneCount >= effectiveTarget && effectiveTarget > 0;
       const isOpen = !isComplete || expandedExercises.has(effectiveExerciseId);
+      // Superset pairing lives on the PLAN slot (pre-swap identity), and
+      // only counts as active when neither side has been swapped today — a
+      // swap already breaks "this is what I planned to superset," so
+      // showing a tag (or skipping rest — see the log-set handler) against
+      // a half-consistent pairing would be misleading rather than helpful.
+      // `slot` has no pairedExerciseId at all for an ad-hoc extra exercise
+      // (todayWorkout.extraExercises entries), so this is naturally absent
+      // there with no extra check needed.
+      const pairSwapped = (id) => !!(todayWorkout && todayWorkout.exerciseSwaps && todayWorkout.exerciseSwaps[id] != null);
+      const pairedSlot = supersetsOn && slot.pairedExerciseId != null && !pairSwapped(slot.exerciseId) && !pairSwapped(slot.pairedExerciseId)
+        ? day.exercises.find(e => e.exerciseId === slot.pairedExerciseId)
+        : null;
       // The +/- sign toggle only appears where a negative can legitimately be
       // entered. The sign is stored per SET (a negative weight is the
       // assistance), not as a flag on the exercise -- but the equipment class
@@ -563,6 +643,7 @@
                 <span class="set-idx">${setNum}</span>
                 ${signBtnHtml(s.entries[0].weight < 0)}
                 <input type="number" inputmode="decimal" step="0.5" class="set-edit-weight" data-action="edit-set" aria-label="Weight" value="${displayWeight(s.entries[0].weight)}">
+                ${perSideNoteHtml(exercisesById[effectiveExerciseId])}
                 <input type="number" inputmode="numeric" step="1" min="1" class="set-edit-reps" data-action="edit-set" aria-label="Reps" value="${s.entries[0].reps}">
                 <button class="del" data-exid="${effectiveExerciseId}" data-idx="${i}" data-action="delete-set" title="Delete set">×</button>
               </div>
@@ -585,6 +666,7 @@
               <span class="set-idx">${label}</span>
               ${signBtnHtml(suggestion.weight != null && suggestion.weight < 0)}
               <input type="number" inputmode="decimal" step="0.5" placeholder="${weightUnit}" aria-label="Weight in ${weightUnit}" class="plan-log-weight" data-action="sync-sign" value="${wVal}">
+              ${perSideNoteHtml(exercisesById[effectiveExerciseId])}
               <input type="number" inputmode="numeric" step="1" min="1" placeholder="reps" aria-label="Reps" class="plan-log-reps" value="${rVal}">
               <button type="button" class="log-btn" data-action="log-set">Log</button>
             </div>
@@ -625,6 +707,7 @@
               ${secondaryBtn}
             </span>
           </div>
+          ${pairedSlot ? `<div class="meta-row pair-row">⇄ Superset with ${esc(pairedSlot.name)}</div>` : ''}
           ${isComplete && !isOpen ? `<div class="meta-row ex-digest">${esc(setSummary)}</div>` : ''}
           <div class="ex-history"${historyOpen ? ' style="display:block" data-rendered="yes"' : ''}>${historyOpen ? exerciseHistoryHtml(effectiveExerciseId, allWorkouts, exercisesById[effectiveExerciseId]) : ''}</div>
           <div class="meta-row">

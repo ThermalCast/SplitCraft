@@ -38,6 +38,18 @@
   function fromKg(weightKg) { return weightUnit === 'lb' ? weightKg / KG_PER_LB : weightKg; }
   function displayWeight(weightKg) { return Math.round(fromKg(weightKg) * 10) / 10; }
 
+  // A small reminder next to every weight input for a `perSide` exercise
+  // (see effectiveLoadKg(), 08-progression.js) — the number in the box is
+  // still just what's on ONE dumbbell, same as it's always been; this only
+  // exists so it's never ambiguous WHY the app's progression math is
+  // treating it as double. Shared by every render site with a weight input
+  // (09-workout.js, 05-history.js) so the wording and markup can't drift
+  // between them. Returns '' for a falsy/missing exercise or one without
+  // the flag, so every call site can splice it in unconditionally.
+  function perSideNoteHtml(exercise) {
+    return exercise && exercise.perSide ? '<span class="per-side-note">per side</span>' : '';
+  }
+
   function formatSetLine(s) {
     const u = weightUnit;
     // RIR is recorded on the set regardless of type, so it renders for all of
@@ -253,5 +265,27 @@
   function populateMuscleSelect(selectEl) {
     selectEl.innerHTML = MUSCLES.filter(m => m.id !== 'unclassified')
       .map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('');
+  }
+
+  // =========================================================================
+  // Apple Fitness (Shortcuts deep link) — see "Apple Fitness" under Set
+  // logging UX in design-summary.md for the full write-up of why this is the
+  // only bridge available and what it can't do.
+  // =========================================================================
+  async function triggerAppleFitnessWorkout() {
+    const name = (await getSetting('appleFitnessShortcutName', '')).trim();
+    if (!name) return false;
+    location.href = `shortcuts://run-shortcut?name=${encodeURIComponent(name)}`;
+    return true;
+  }
+  // Called from every place a SplitCraft session can start (see the
+  // `sessionJustStarted` flag in 02-storage.js); a no-op unless the setting
+  // is on AND this particular call is the one that actually started today's
+  // session, so it can never fire twice in one day no matter how many times
+  // Start is pressed or sets are logged afterward.
+  async function maybeAutoStartAppleFitness(workout) {
+    if (!workout || !workout.sessionJustStarted) return;
+    if (!(await getSetting('appleFitnessAutoStart', false))) return;
+    await triggerAppleFitnessWorkout();
   }
 

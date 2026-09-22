@@ -68,6 +68,36 @@
     return 0.75;
   }
 
+  // Whole years as of `today`, from a 'YYYY-MM-DD' birthday — string
+  // comparison throughout (no Date object), matching how every other
+  // calendar calculation in this app (startOfWeek(), weekKeyOfTs()) already
+  // avoids timezone surprises. Returns null for a missing/malformed
+  // birthday rather than 0, so a caller can tell "no birthday given" apart
+  // from "born today."
+  function ageFromBirthday(birthday, today) {
+    if (!birthday) return null;
+    const [by, bm, bd] = birthday.split('-').map(Number);
+    const [ty, tm, td] = today.split('-').map(Number);
+    if (!by || !bm || !bd) return null;
+    let age = ty - by;
+    if (tm < bm || (tm === bm && td < bd)) age--;
+    return age >= 0 ? age : null;
+  }
+
+  // The one place that decides WHICH age counts — a birthday, once given,
+  // is authoritative (that's the entire point: an age nobody remembers to
+  // bump every year is the bug this exists to fix), and the plain numeric
+  // setting is only a fallback for someone who'd rather not give an exact
+  // birthday. Recomputed fresh every call (never cached), so it "increments"
+  // simply by being read on a different day — nothing has to notice a
+  // birthday passed.
+  function currentAge() {
+    const birthday = getSettingSync('birthday', '');
+    const derived = ageFromBirthday(birthday, todayStr());
+    if (derived != null) return derived;
+    return Number(getSettingSync('age', 0)) || 0;
+  }
+
   // ENERGY BALANCE. Direction is well established — strength progress
   // attenuates in a caloric deficit and is modestly favoured in a surplus.
   // The magnitudes, again, are a judgement call.
@@ -98,12 +128,22 @@
   // computing it off the wrong number. Falls back to the raw weight when
   // bodyweight is unknown, so the setting stays optional.
   let bodyweightKg = 0;
+  // Dual-implement work (a dumbbell in each hand) is logged per side, not
+  // combined — the number stored is what's on ONE dumbbell, almost always,
+  // for hand-entered sets. `perSide` (on the exercise record) marks that so
+  // this is the one place that doubles it into the real total load, the
+  // same way the bodyweight/assisted branch below turns a stored number
+  // into the true load it represents. This is the single choke point every
+  // consumer of "real load" already runs through (progressionPlan,
+  // checkPersonalRecord, setVolumeKg, the History progress chart), so
+  // fixing it here fixes all of them at once.
   function effectiveLoadKg(exercise, weightKg) {
+    const load = exercise && exercise.perSide ? weightKg * 2 : weightKg;
     const equip = exerciseEquipment(exercise);
     if ((equip === 'bodyweight' || equip === 'assisted') && bodyweightKg > 0) {
-      return bodyweightKg + weightKg;
+      return bodyweightKg + load;
     }
-    return weightKg;
+    return load;
   }
 
   // SEX_NOTE — why sex is stored but deliberately does not scale this.
@@ -301,6 +341,52 @@
   // already guarding it).
   function workingEntry(set) {
     return (set && set.entries && set.entries.length) ? set.entries[0] : null;
+  }
+
+  // A new best, for the "New best" toast (09-workout.js) — deliberately
+  // reuses workingEntry()/effectiveLoadKg() rather than a second pass over
+  // the data, so "what counts as this set's number" can't quietly disagree
+  // with what the progression algorithm and the History chart already use
+  // it for. Compares against every OTHER set ever logged for this exercise
+  // (the just-logged one is excluded by its own `ts`, forced unique by
+  // logSet() — see "Set timestamps are unique" in design-summary.md), and is
+  // deliberately silent when there's nothing to compare against: a
+  // first-ever logged set isn't a milestone, it's just the starting point.
+  // The est-1RM guard (`load > 0`) mirrors the progress chart's own rule —
+  // Epley is meaningless on a negative (assisted) load unless bodyweight
+  // makes the effective load positive, which effectiveLoadKg() already
+  // accounts for — reusing the same condition rather than a second
+  // definition of when est-1RM is valid.
+  // Epley estimated 1RM — the one formula both the History progress chart
+  // (05-history.js) and checkPersonalRecord() use, kept in one place so a
+  // future change to it (or to the "only valid on a positive load" rule)
+  // can't land in one and not the other.
+  function epley1RM(loadKg, reps) { return loadKg * (1 + reps / 30); }
+
+  function checkPersonalRecord(exercise, allWorkouts, exerciseId, newSet) {
+    let priorBestLoad = -Infinity, priorBestE1RM = -Infinity;
+    for (const w of allWorkouts) {
+      const entry = w.exercises.find(e => e.exerciseId === exerciseId);
+      if (!entry) continue;
+      for (const s of entry.sets) {
+        if (s.ts === newSet.ts) continue;
+        const en = workingEntry(s);
+        if (!en) continue;
+        const load = effectiveLoadKg(exercise, en.weight);
+        if (load > priorBestLoad) priorBestLoad = load;
+        if (load > 0) {
+          const est = epley1RM(load, en.reps);
+          if (est > priorBestE1RM) priorBestE1RM = est;
+        }
+      }
+    }
+    const newEn = workingEntry(newSet);
+    if (!newEn) return { weightPR: false, e1rmPR: false, newLoad: null };
+    const newLoad = effectiveLoadKg(exercise, newEn.weight);
+    const weightPR = priorBestLoad !== -Infinity && newLoad > priorBestLoad;
+    const e1rmPR = newLoad > 0 && priorBestE1RM !== -Infinity
+      && epley1RM(newLoad, newEn.reps) > priorBestE1RM;
+    return { weightPR, e1rmPR, newLoad };
   }
 
   // Most recent working weight per exercise: the heaviest working set (see
@@ -602,7 +688,7 @@
       : rirOf(lastSet);
 
     const modifiers = {
-      age: Number(getSettingSync('age', 0)) || 0,
+      age: currentAge(),
       energy: getSettingSync('energyBalance', 'maintenance'),
       rir: lastRir
     };
