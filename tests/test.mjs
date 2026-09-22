@@ -38,6 +38,17 @@ const mismatched = catalog.filter(([, n, m]) => app.classifyMuscleFromName(n) !=
 ok(`all ${catalog.length} catalog entries agree with the muscle classifier`, mismatched.length === 0, mismatched.join(', '));
 
 // ---- 3. progression maths ----
+// Pinned to the raw kg-native defaults, not whatever the harness's
+// fillInMissingEquipmentSteps() one-time fix snapped them to for the
+// default 'lb' unit (07-settings.js/08-progression.js) — these expected
+// values were written against the kg defaults specifically.
+// A direct app.equipmentStepsKg assignment doesn't reach the module-level
+// `let` of the same name -- that's a separate declarative binding, not a
+// property on the sandbox object, even though they share a name. Going
+// through the real write path (setSetting + a reload) is what actually
+// updates the binding loadStepKg()/progressionPlan() read.
+await app.setSetting('equipmentStepsKg', { barbell: 2.5, dumbbell: 2, machine: 5, cable: 5, assisted: 5, bodyweight: 2.5, other: 2.5 });
+await app.loadSettingsIntoForm();
 const bar = { name: 'Barbell Bench Press', equipment: 'barbell' };
 const p1 = app.progressionPlan(100, 'upper', 'intermediate', bar, {});
 const p2 = app.progressionPlan(100, 'upper', 'intermediate', bar, { rir: 3 });

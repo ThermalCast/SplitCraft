@@ -950,6 +950,17 @@ check('no prompt when there is no plan yet', promptBox.hidden === true);
 // ---------------------------------------------------------------------------
 {
   await app.syncDefaultExercises();
+  // Pinned to the raw kg-native defaults, not whatever the harness's
+  // fillInMissingEquipmentSteps() one-time fix snapped them to for the
+  // default 'lb' unit (07-settings.js/08-progression.js) — this test's
+  // expected values were written against the kg defaults specifically.
+  // A direct app.equipmentStepsKg assignment doesn't reach the module-level
+  // `let` of the same name -- that's a separate declarative binding, not a
+  // property on the sandbox object, even though they share a name. Going
+  // through the real write path (setSetting + a reload) is what actually
+  // updates the binding loadStepKg()/progressionPlan() read.
+  await app.setSetting('equipmentStepsKg', { barbell: 2.5, dumbbell: 2, machine: 5, cable: 5, assisted: 5, bodyweight: 2.5, other: 2.5 });
+  await app.loadSettingsIntoForm();
   await seedDemoData(app);   // heaviest logged lift here is a 85kg Back Squat
   const all0 = await app.getAllRecords('exercises');
   const nameOf = (n) => all0.find(e => e.name === n);
@@ -1692,9 +1703,18 @@ check('clearSetting removes it from the cache',
 // function of a weight and an equipment class, so these pass minimal
 // {equipment} objects rather than real catalog exercises. Default equipment
 // steps (barbell 2.5kg, dumbbell 2kg, cable 5kg) are used throughout, so no
-// settings need to be configured first.
+// settings need to be configured first — pinned explicitly rather than
+// trusting the harness's default 'lb' unit not to have already snapped them
+// to their lb-native equivalents (fillInMissingEquipmentSteps()).
 // ---------------------------------------------------------------------------
 {
+  // A direct app.equipmentStepsKg assignment doesn't reach the module-level
+  // `let` of the same name -- that's a separate declarative binding, not a
+  // property on the sandbox object, even though they share a name. Going
+  // through the real write path (setSetting + a reload) is what actually
+  // updates the binding loadStepKg()/progressionPlan() read.
+  await app.setSetting('equipmentStepsKg', { barbell: 2.5, dumbbell: 2, machine: 5, cable: 5, assisted: 5, bodyweight: 2.5, other: 2.5 });
+  await app.loadSettingsIntoForm();
   const barbellFull = app.warmupSets(100, { equipment: 'barbell' });
   check('warmupSets(100, barbell) proposes a 50/70/85% ramp',
     JSON.stringify(barbellFull) === JSON.stringify([{ weightKg: 50, reps: 8 }, { weightKg: 70, reps: 5 }, { weightKg: 85, reps: 2 }]),
@@ -2481,6 +2501,84 @@ check('clearSetting removes it from the cache',
   await app.clearWorkoutHistory();
   await app.deleteRecord('exercises', perSideExId);
   await app.deleteRecord('exercises', plainExId);
+}
+
+// ---------------------------------------------------------------------------
+// fillInMissingEquipmentSteps() (08-progression.js) — a never-explicitly-
+// saved equipment class was silently stuck at its raw kg default (2.5kg
+// barbell = 5.51lb, not a round lb number) even though the increment grid's
+// own "nearest" display made it LOOK configured (e.g. "5 lb" shown as
+// selected). This is the fix: fill in — and persist — the same nearest
+// match the grid displays, once, for any class never actually saved.
+// ---------------------------------------------------------------------------
+{
+  // KG_PER_LB, spelled out rather than read from the app: toKg()/fromKg()
+  // are real functions (safe to call), but they read the module-level
+  // `weightUnit` internally, and getting that into a known state from a
+  // test is its own small dance (see below) -- simplest to just not need
+  // it for these pure-function checks at all.
+  const LB_TO_KG = 0.45359237;
+  const knownDefaults = { barbell: 2.5, dumbbell: 2, machine: 5, cable: 5, assisted: 5, bodyweight: 2.5, other: 2.5 };
+
+  check('nothing missing from storedSteps -> no change (returns null)',
+    app.fillInMissingEquipmentSteps(knownDefaults, knownDefaults, 'lb') === null);
+
+  {
+    const filled = app.fillInMissingEquipmentSteps({}, knownDefaults, 'kg');
+    check('kg unit: filling in from empty storedSteps keeps the raw kg defaults (already round in kg)',
+      filled && Math.abs(filled.barbell - 2.5) < 1e-9 && Math.abs(filled.dumbbell - 2) < 1e-9,
+      JSON.stringify(filled));
+  }
+
+  {
+    const filled = app.fillInMissingEquipmentSteps({}, knownDefaults, 'lb');
+    check('lb unit: filling in from empty storedSteps snaps to round LB-native steps (5lb barbell/dumbbell, 10lb machine)',
+      filled
+      && Math.abs(filled.barbell - 5 * LB_TO_KG) < 1e-9
+      && Math.abs(filled.dumbbell - 5 * LB_TO_KG) < 1e-9
+      && Math.abs(filled.machine - 10 * LB_TO_KG) < 1e-9,
+      JSON.stringify(filled));
+  }
+
+  {
+    // Only the class actually missing gets filled; one already present
+    // (even mid-value) is left completely alone.
+    const partial = { barbell: 2.5 };
+    const filled = app.fillInMissingEquipmentSteps(partial, { ...knownDefaults, barbell: 999 }, 'lb');
+    check('a class already present in storedSteps is never touched, even if its current value looks odd',
+      filled && filled.barbell === 999);
+    check('a class missing from storedSteps IS filled in',
+      filled && Math.abs(filled.dumbbell - 5 * LB_TO_KG) < 1e-9);
+  }
+
+  // Integration, through the real settings-load path (loadSettingsIntoForm()
+  // is a genuine top-level function, safe to call and observe; the
+  // module-level `equipmentStepsKg`/`weightUnit` variables it updates are
+  // NOT themselves reachable as app.equipmentStepsKg/app.weightUnit --
+  // those are separate `let` bindings inside the concatenated script, not
+  // properties on the sandbox object, even though the names match. Verified
+  // entirely through getSetting(), the one channel proven to reflect what
+  // was actually persisted.):
+  //
+  // A genuinely fresh install (nothing ever saved) gets this applied
+  // automatically on load, and it's actually PERSISTED (not just held in
+  // memory) -- and once saved, a second load never re-snaps it.
+  await app.clearSetting('equipmentStepsKg');
+  await app.setSetting('weightUnit', 'lb');
+  await app.loadSettingsIntoForm();
+  const afterFreshLoad = await app.getSetting('equipmentStepsKg', {});
+  check('a fresh install auto-fills AND saves barbell to its 5lb-equivalent on first load',
+    Math.abs(afterFreshLoad.barbell - 5 * LB_TO_KG) < 1e-9, JSON.stringify(afterFreshLoad));
+
+  // The user now explicitly picks something else for barbell...
+  await app.setSetting('equipmentStepsKg', { ...afterFreshLoad, barbell: 2.5 * LB_TO_KG });
+  await app.loadSettingsIntoForm();
+  const afterUserChoice = await app.getSetting('equipmentStepsKg', {});
+  check('...and a SECOND load never re-snaps a class that already has a real saved value',
+    Math.abs(afterUserChoice.barbell - 2.5 * LB_TO_KG) < 1e-9, JSON.stringify(afterUserChoice));
+
+  await app.setSetting('equipmentStepsKg', knownDefaults);
+  await app.loadSettingsIntoForm(); // leave state clean for anything after this
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

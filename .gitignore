@@ -12,3 +12,7 @@ fitbod_export.csv
 node_modules/
 .DS_Store
 Thumbs.db
+
+# Personal one-off scripts and their inputs/outputs (backup files, exports) —
+# never meant to ship, never meant to be reviewed by anyone else.
+local-tools/

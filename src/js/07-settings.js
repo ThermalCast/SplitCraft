@@ -638,7 +638,16 @@
     // Merge over the defaults rather than replacing wholesale, so a stored
     // object written before a new equipment class existed still yields a step
     // for that class instead of undefined.
-    equipmentStepsKg = { ...equipmentStepsKg, ...(await getSetting('equipmentStepsKg', {})) };
+    const storedSteps = await getSetting('equipmentStepsKg', {});
+    equipmentStepsKg = { ...equipmentStepsKg, ...storedSteps };
+    // One-time fix for a class never explicitly saved -- see
+    // fillInMissingEquipmentSteps() (08-progression.js) for why this can't
+    // just be left to the grid's own display-only "nearest" snap.
+    const filledSteps = fillInMissingEquipmentSteps(storedSteps, equipmentStepsKg, weightUnit);
+    if (filledSteps) {
+      equipmentStepsKg = filledSteps;
+      await setSetting('equipmentStepsKg', equipmentStepsKg);
+    }
     renderIncrementGrid();
     refreshBodyweightField();
     refreshExperienceHint();

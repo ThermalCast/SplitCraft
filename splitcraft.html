@@ -6529,7 +6529,16 @@
     // Merge over the defaults rather than replacing wholesale, so a stored
     // object written before a new equipment class existed still yields a step
     // for that class instead of undefined.
-    equipmentStepsKg = { ...equipmentStepsKg, ...(await getSetting('equipmentStepsKg', {})) };
+    const storedSteps = await getSetting('equipmentStepsKg', {});
+    equipmentStepsKg = { ...equipmentStepsKg, ...storedSteps };
+    // One-time fix for a class never explicitly saved -- see
+    // fillInMissingEquipmentSteps() (08-progression.js) for why this can't
+    // just be left to the grid's own display-only "nearest" snap.
+    const filledSteps = fillInMissingEquipmentSteps(storedSteps, equipmentStepsKg, weightUnit);
+    if (filledSteps) {
+      equipmentStepsKg = filledSteps;
+      await setSetting('equipmentStepsKg', equipmentStepsKg);
+    }
     renderIncrementGrid();
     refreshBodyweightField();
     refreshExperienceHint();
@@ -6808,6 +6817,10 @@
   // 2.5lb plates (5lb jump) and 1.25lb microplates.
   const INCREMENT_CHOICES = { kg: [0.5, 1, 1.25, 2, 2.5, 5, 10], lb: [1, 2.5, 5, 10, 20] };
 
+  function nearestIncrementChoice(current, choices) {
+    return choices.reduce((best, v) => Math.abs(v - current) < Math.abs(best - current) ? v : best, choices[0]);
+  }
+
   function renderIncrementGrid() {
     const grid = document.getElementById('increment-grid');
     if (!grid) return;
@@ -6817,10 +6830,48 @@
       // A stored kg value can land between the offered display-unit options
       // when the unit is switched under it. Snap to the nearest offered value
       // rather than rendering a select whose display contradicts the setting.
-      const nearest = choices.reduce((best, v) => Math.abs(v - current) < Math.abs(best - current) ? v : best, choices[0]);
+      const nearest = nearestIncrementChoice(current, choices);
       const opts = choices.map(v => `<option value="${v}" ${v === nearest ? 'selected' : ''}>${v} ${weightUnit}</option>`).join('');
       return `<label for="step-${eq.id}">${esc(eq.name)}</label><select id="step-${eq.id}" data-equip="${eq.id}">${opts}</select>`;
     }).join('');
+  }
+
+  // Any equipment class never explicitly saved sits at its raw kg default
+  // (01-data.js), which rarely converts to a round number in the OTHER
+  // unit (2.5kg barbell -> 5.51lb, not 5). renderIncrementGrid()'s own
+  // "nearest" snap above only ever decided what the dropdown SHOWS —
+  // nothing wrote it back, so the stored step (and every suggestion
+  // rounded to it) could silently disagree with what Settings appeared to
+  // say, with no visible sign anything was wrong. This fills in — and
+  // SAVES — the same nearest-match the grid is about to display, so the
+  // dropdown and the stored step can never disagree again. Runs once per
+  // equipment class, only for one missing from `storedSteps` (the RAW
+  // object read from storage, before defaults were merged in) — a class
+  // the user (or this fill-in itself, on a previous load) has ever
+  // actually saved is never touched again, same "don't overwrite a real
+  // choice" rule the catalog sync already follows for muscle/equipment.
+  // Returns the filled-in map, or null if nothing was missing.
+  //
+  // Converts using the `unit` PARAMETER throughout, deliberately not
+  // toKg()/fromKg() (which read the module-level weightUnit instead of
+  // whatever unit was actually asked for here) — the one production call
+  // site always happens to pass its own current weightUnit, which is why
+  // that mismatch was never visible there, but a pure function shouldn't
+  // silently depend on ambient state its own signature already takes as an
+  // argument.
+  function fillInMissingEquipmentSteps(storedSteps, currentSteps, unit) {
+    const choices = INCREMENT_CHOICES[unit] || INCREMENT_CHOICES.kg;
+    const toDisplay = (kg) => unit === 'lb' ? kg / KG_PER_LB : kg;
+    const toKgInUnit = (v) => unit === 'lb' ? v * KG_PER_LB : v;
+    let changed = false;
+    const filled = { ...currentSteps };
+    for (const eq of EQUIPMENT) {
+      if (eq.id in storedSteps) continue;
+      const current = toDisplay(filled[eq.id] ?? eq.defaultStepKg);
+      filled[eq.id] = toKgInUnit(nearestIncrementChoice(current, choices));
+      changed = true;
+    }
+    return changed ? filled : null;
   }
 
   function readIncrementGrid() {

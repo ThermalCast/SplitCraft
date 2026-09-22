@@ -1168,6 +1168,42 @@ be typed.
   re-round and rewrite every configured step (2kg → nearest lb option → back
   to a different kg value).
 
+### A never-configured equipment step used to silently disagree with what Settings showed
+
+Every equipment class ships a kg-native `defaultStepKg` (01-data.js) —
+2.5kg barbell, 2kg dumbbell, 5kg machine/cable/assisted. Kg-based defaults
+rarely convert to a round number in the OTHER unit (2.5kg ≈ 5.51lb, not a
+clean 5), so a suggestion rounded to a never-touched class's raw kg default
+could land on an oddly-precise-looking lb figure (45kg reads as "99.2lb")
+even though it's a perfectly normal, loadable weight. `renderIncrementGrid()`
+already computed the nearest offered option in the current unit purely for
+*display* (`nearestIncrementChoice()`) — but nothing ever wrote that choice
+back, so the dropdown could show "5 lb" as selected while the number
+actually driving every suggestion was still the un-round kg default,
+un-rounded, with no visible sign of the mismatch.
+
+**`fillInMissingEquipmentSteps(storedSteps, currentSteps, unit)`**
+(08-progression.js), called from `loadSettingsIntoForm()`: for any
+equipment class absent from `storedSteps` (the raw object read from
+storage, before defaults were merged in), computes and **saves** the same
+nearest-match the grid is about to display — so the dropdown and the
+stored step can never disagree again. Runs once per equipment class ever:
+a class already present in storage (whether from the user's own choice, or
+from this fill-in on a previous load) is never touched again, the same
+"don't overwrite a real choice" rule the catalog sync already applies to
+muscle/equipment. Converts using the `unit` parameter it's given, not
+`toKg()`/`fromKg()` (which read the module-level `weightUnit` instead) — a
+pure function shouldn't silently depend on ambient state its own signature
+already takes as an argument, even though the one production call site
+happens to always pass its own current `weightUnit`.
+
+Practically: a fresh install (or anyone who's never touched Settings →
+Workout's increment grid) now gets US-typical increments the first time
+Settings loads in lb mode — 5lb for barbell/dumbbell, 10lb for
+machine/cable/assisted — instead of silently staying on kg-native steps
+that never round cleanly in lb. A kg-unit user sees no change at all: every
+current `defaultStepKg` is already a valid `INCREMENT_CHOICES.kg` entry.
+
 ## Per-side weight (dumbbell/dual-implement ambiguity)
 
 **The ambiguity, and why it mattered.** A logged weight for genuinely
