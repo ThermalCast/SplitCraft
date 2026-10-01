@@ -168,6 +168,24 @@ await fireAction('sync-dropmyo-entry', () => registries.DROPMYO_ROW_INPUT_ACTION
   check('toggle-sign negates the weight input and marks the button negative',
     Number(input.value) === -60 && btn.classList.contains('negative'));
 }
+{
+  // The real markup, not signPair()'s direct siblings: weightFieldHtml()
+  // wraps the input in a .weight-field span, so the button's next sibling
+  // is that span and the input's previous sibling is nothing at all.
+  const btn = actionStub();
+  btn.classList.add('sign-btn');
+  const input = actionStub({}, '60');
+  const field = actionStub();
+  field.classList.add('weight-field');
+  field.querySelector = (sel) => (sel === 'input' ? input : null);
+  btn.nextElementSibling = field;
+  field.previousElementSibling = btn;
+  input.previousElementSibling = null;
+  input.closest = (sel) => (sel === '.weight-field' ? field : null);
+  await fireAction('toggle-sign (wrapped weight field)', () => registries.DROPMYO_ROW_ACTIONS['toggle-sign'](btn));
+  check('toggle-sign reaches an input wrapped in .weight-field and syncs the button',
+    Number(input.value) === -60 && btn.classList.contains('negative'), `value=${input.value}`);
+}
 await fireAction('remove-dropmyo-entry', () => registries.DROPMYO_ROW_ACTIONS['remove-dropmyo-entry'](actionStub({ idx: '0' })));
 
 // --- HISTORY_* (05-history.js) — a PAST day's workout, so it's independent
@@ -313,6 +331,37 @@ await app.refreshLogAndHistory();
   const after = await app.getWorkoutForDate(today);
   const afterCount = after.exercises.find(e => e.exerciseId === dayExId).sets.length;
   check('log-set actually logged a set', afterCount === beforeCount + 1, `${beforeCount} -> ${afterCount}`);
+}
+{
+  // Regression: the active day is "Legs" here (see the day-picker rotation
+  // check above), which has NOT had anything logged today yet. Logging a
+  // set on its SECOND exercise while its first sits untouched used to snap
+  // the view back to that first, still-incomplete card -- the old reveal
+  // logic always picked the first incomplete card in plan order, regardless
+  // of which one was actually just worked. Confirms the fix reveals the
+  // exercise just logged instead (it's not complete yet either, at 1 of 2).
+  const legsDay = plan.days[2];
+  const exA = legsDay.exercises[0].exerciseId;
+  const exBSlot = legsDay.exercises[1];
+  const exB = exBSlot.exerciseId;
+  const cardA = app.document.getElementById(`ex-card-${exA}`);
+  const cardB = app.document.getElementById(`ex-card-${exB}`);
+  let revealedA = false, revealedB = false;
+  cardA.scrollIntoView = () => { revealedA = true; };
+  cardB.scrollIntoView = () => { revealedB = true; };
+
+  const group = actionStub({ exid: String(exB), origExid: String(exB), target: String(exBSlot.targetSets) });
+  group.querySelector = (sel) => {
+    if (sel === '.plan-log-weight') return actionStub({}, '70');
+    if (sel === '.plan-log-reps') return actionStub({}, '9');
+    return actionStub();
+  };
+  const logBtn = actionStub();
+  logBtn.closest = () => group;
+  await fireAction('log-set (out of order)', () => registries.WORKOUT_CLICK_ACTIONS['log-set'](logBtn));
+
+  check('logging a later exercise reveals IT, not an earlier untouched one',
+    revealedB === true && revealedA === false, `revealedA=${revealedA} revealedB=${revealedB}`);
 }
 await fireAction('toggle-exercise', () => registries.WORKOUT_CLICK_ACTIONS['toggle-exercise'](actionStub({ exid: String(dayExId) })));
 {

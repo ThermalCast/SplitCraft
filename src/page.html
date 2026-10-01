@@ -438,9 +438,20 @@
     font-size: 10px; color: var(--text-faint); border: 1px solid var(--border);
     border-radius: var(--r-pill); padding: 1px 7px; white-space: nowrap;
   }
+  /* A weight input plus its unit suffix and (optional) per-side note,
+     stacked as a column so both read as part of the one weight field
+     instead of competing with the reps input for space in the row. */
+  .weight-field { display: flex; flex-direction: column; gap: 3px; flex: 1 1 90px; min-width: 90px; }
+  .weight-input-wrap { position: relative; display: flex; }
+  .weight-input-wrap input { padding-right: 30px !important; }
+  .weight-unit {
+    position: absolute; right: 11px; top: 50%; transform: translateY(-50%);
+    font-size: 11px; color: var(--text-faint); pointer-events: none; text-transform: lowercase;
+  }
   .per-side-note {
     font-size: 10px; color: var(--text-faint); border: 1px solid var(--border);
-    border-radius: var(--r-pill); padding: 1px 7px; white-space: nowrap; margin-left: 4px;
+    border-radius: var(--r-pill); padding: 1px 7px; white-space: nowrap;
+    align-self: flex-start;
   }
 
   .switch-row {

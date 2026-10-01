@@ -205,8 +205,7 @@
       const negative = parseFloat(entry.weight) < 0;
       row.innerHTML = `
         <button type="button" class="sign-btn${negative ? ' negative' : ''}" data-action="toggle-sign" title="Toggle negative — for assisted reps, enter how much weight is taken off you">±</button>
-        <input type="number" inputmode="decimal" step="0.5" placeholder="Weight (${weightUnit})" value="${entry.weight}" data-idx="${i}" data-field="weight" data-action="sync-dropmyo-entry">
-        ${perSideNoteHtml(dropMyoExercise)}
+        ${weightFieldHtml(`<input type="number" inputmode="decimal" step="0.5" aria-label="Weight in ${weightUnit}" value="${entry.weight}" data-idx="${i}" data-field="weight" data-action="sync-dropmyo-entry">`, dropMyoExercise)}
         <input type="number" inputmode="numeric" step="1" min="1" placeholder="Reps" value="${entry.reps}" data-idx="${i}" data-field="reps" data-action="sync-dropmyo-entry" class="entry-reps">
         ${dropMyoEntries.length > 1 ? `<button type="button" class="rm" data-idx="${i}" data-action="remove-dropmyo-entry">×</button>` : ''}
       `;
@@ -410,7 +409,7 @@
         if (isFirstOfActiveSupersetPair(day, origExerciseId, workout.exerciseSwaps, supersetsOn)) hideTimerSheet();
         else if (shouldRestAfter(done, prescribed)) startRestTimer();
         else hideTimerSheet();
-        revealNextOnRender = true;
+        revealNextOnRender = exerciseId;
         await refreshLogAndHistory();
         await maybeAutoStartAppleFitness(workout);
       } finally {
@@ -572,6 +571,14 @@
     // same render/tap.
     const supersetsOn = await getSetting('supersetsEnabled', true);
 
+    // Order and completeness of every card this render produces, in the
+    // exact order buildCard() is called below (plan exercises, then
+    // extras) -- the authoritative source for "what comes after what" used
+    // by the reveal-on-log logic further down. Built from the same data
+    // the cards themselves render from, rather than re-reading it back out
+    // of the rendered HTML/DOM afterward.
+    const cardOrder = [];
+
     // Builds one exercise-group card. `slot` mirrors a plan day's exercise
     // shape ({exerciseId, name, targetSets, repRangeMin, repRangeMax})
     // whether it actually came from the plan or from today's ad-hoc
@@ -599,6 +606,7 @@
       const effectiveTarget = overrideVal != null ? overrideVal : slot.targetSets;
       const isOverridden = overrideVal != null;
       const isComplete = doneCount >= effectiveTarget && effectiveTarget > 0;
+      cardOrder.push({ exerciseId: effectiveExerciseId, isComplete });
       const isOpen = !isComplete || expandedExercises.has(effectiveExerciseId);
       // Superset pairing lives on the PLAN slot (pre-swap identity), and
       // only counts as active when neither side has been swapped today — a
@@ -642,8 +650,7 @@
               <div class="plan-log-row done-set" data-exid="${effectiveExerciseId}" data-idx="${i}" data-kg="${s.entries[0].weight}">
                 <span class="set-idx">${setNum}</span>
                 ${signBtnHtml(s.entries[0].weight < 0)}
-                <input type="number" inputmode="decimal" step="0.5" class="set-edit-weight" data-action="edit-set" aria-label="Weight" value="${displayWeight(s.entries[0].weight)}">
-                ${perSideNoteHtml(exercisesById[effectiveExerciseId])}
+                ${weightFieldHtml(`<input type="number" inputmode="decimal" step="0.5" class="set-edit-weight" data-action="edit-set" aria-label="Weight" value="${displayWeight(s.entries[0].weight)}">`, exercisesById[effectiveExerciseId])}
                 <input type="number" inputmode="numeric" step="1" min="1" class="set-edit-reps" data-action="edit-set" aria-label="Reps" value="${s.entries[0].reps}">
                 <button class="del" data-exid="${effectiveExerciseId}" data-idx="${i}" data-action="delete-set" title="Delete set">×</button>
               </div>
@@ -665,8 +672,7 @@
             <div class="plan-log-row next-set">
               <span class="set-idx">${label}</span>
               ${signBtnHtml(suggestion.weight != null && suggestion.weight < 0)}
-              <input type="number" inputmode="decimal" step="0.5" placeholder="${weightUnit}" aria-label="Weight in ${weightUnit}" class="plan-log-weight" data-action="sync-sign" value="${wVal}">
-              ${perSideNoteHtml(exercisesById[effectiveExerciseId])}
+              ${weightFieldHtml(`<input type="number" inputmode="decimal" step="0.5" aria-label="Weight in ${weightUnit}" class="plan-log-weight" data-action="sync-sign" value="${wVal}">`, exercisesById[effectiveExerciseId])}
               <input type="number" inputmode="numeric" step="1" min="1" placeholder="reps" aria-label="Reps" class="plan-log-reps" value="${rVal}">
               <button type="button" class="log-btn" data-action="log-set">Log</button>
             </div>
@@ -699,7 +705,7 @@
             ? `<button type="button" class="remove-ex-btn" data-action="remove-extra" title="Remove — nothing logged yet">Remove</button>`
             : '';
       return `
-        <div class="exercise-group${isComplete ? ' complete' : ''}${isOpen ? '' : ' collapsed'}" data-exid="${effectiveExerciseId}" data-orig-exid="${slot.exerciseId}" data-target="${effectiveTarget}">
+        <div class="exercise-group${isComplete ? ' complete' : ''}${isOpen ? '' : ' collapsed'}" id="ex-card-${effectiveExerciseId}" data-exid="${effectiveExerciseId}" data-orig-exid="${slot.exerciseId}" data-target="${effectiveTarget}">
           <div class="ex-name">
             <span>${isComplete ? '<span class="ex-tick">✓</span> ' : ''}${esc(effectiveName)}${isSwapped ? ` <span class="override-note">swapped today</span>` : ''}${!allowSwap ? ` <span class="override-note">added today</span>` : ''}</span>
             <span class="ex-actions">
@@ -756,10 +762,27 @@
     // Bring the next thing to do into view instead. `block: 'nearest'` is a
     // no-op when it is already visible, so this never yanks the page around
     // for someone who can already see what they need.
+    //
+    // `revealNextOnRender` carries the exerciseId just logged, not a bare
+    // flag: this used to always jump to the FIRST incomplete card in plan
+    // order, which is correct top-to-bottom but actively wrong out of
+    // order -- logging a set on exercise 4 snapped straight back to
+    // exercise 1, which was left incomplete on purpose. Reveal the
+    // exercise just worked (if it still has sets left) or whatever comes
+    // after it in the list (once it's done); never fall back to scanning
+    // from the top, since an earlier "incomplete" card is one the lifter
+    // already chose to skip past.
     if (revealNextOnRender) {
+      const loggedExId = revealNextOnRender;
       revealNextOnRender = false;
-      const nextUp = container.querySelector('.exercise-group:not(.complete)');
-      if (nextUp && nextUp.scrollIntoView) nextUp.scrollIntoView({ block: 'nearest' });
+      const loggedIdx = cardOrder.findIndex(c => c.exerciseId === loggedExId);
+      const target = loggedIdx === -1 ? null
+        : !cardOrder[loggedIdx].isComplete ? cardOrder[loggedIdx]
+        : cardOrder.slice(loggedIdx + 1).find(c => !c.isComplete);
+      if (target) {
+        const el = document.getElementById(`ex-card-${target.exerciseId}`);
+        if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+      }
     }
 
     delegate(container, 'click', WORKOUT_CLICK_ACTIONS);

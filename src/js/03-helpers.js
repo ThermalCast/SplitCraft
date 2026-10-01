@@ -50,6 +50,20 @@
     return exercise && exercise.perSide ? '<span class="per-side-note">per side</span>' : '';
   }
 
+  // Wraps a weight `<input>`'s markup with a persistent unit label overlaid
+  // on its right edge, and the per-side reminder (if any) on its own line
+  // beneath. A `placeholder` showing the unit used to be the only cue, and
+  // a placeholder disappears the instant a value is typed -- exactly when
+  // the question "what unit is this?" matters most. The per-side note used
+  // to sit inline between the weight and reps inputs, reading as a third,
+  // unlabeled field wedged into a two-field row with no visual tie to the
+  // weight it's actually about; underneath the field it belongs to is
+  // unambiguous. Shared by every render site with a weight input
+  // (09-workout.js, 05-history.js) so the markup can't drift between them.
+  function weightFieldHtml(inputHtml, exercise) {
+    return `<span class="weight-field"><span class="weight-input-wrap">${inputHtml}<span class="weight-unit" aria-hidden="true">${weightUnit}</span></span>${perSideNoteHtml(exercise)}</span>`;
+  }
+
   function formatSetLine(s) {
     const u = weightUnit;
     // RIR is recorded on the set regardless of type, so it renders for all of
@@ -131,18 +145,26 @@
   // input — the initial state is baked into the button's class string at
   // render time (every render already knows the starting value's sign), so
   // this is only needed for the click-to-negate and type-to-negate cases.
+  // The DOM contract: a `.sign-btn` is immediately followed by its weight
+  // input's `.weight-field` wrapper (see weightFieldHtml()), so neither side
+  // is the other's direct sibling -- both lookups step through the wrapper.
   function syncSignClass(weightInput) {
-    const btn = weightInput.previousElementSibling;
+    const field = weightInput.closest ? weightInput.closest('.weight-field') : null;
+    const btn = (field || weightInput).previousElementSibling;
     if (!btn || !btn.classList || !btn.classList.contains('sign-btn')) return;
     btn.classList.toggle('negative', parseFloat(weightInput.value) < 0);
   }
+  function weightInputAfter(signBtn) {
+    const next = signBtn.nextElementSibling;
+    if (next && next.classList && next.classList.contains('weight-field')) return next.querySelector('input');
+    return next;
+  }
   // The click handler for every `.sign-btn` in the app (entry rows, History,
   // the active workout) — one shared action rather than a separate
-  // per-container sign-button wiring pass. `el` is the button; the weight
-  // input is its next sibling (the DOM contract every sign-btn markup keeps).
+  // per-container sign-button wiring pass. `el` is the button.
   const TOGGLE_SIGN_ACTIONS = {
     'toggle-sign': (el) => {
-      const input = el.nextElementSibling;
+      const input = weightInputAfter(el);
       if (!input) return;
       const cur = parseFloat(input.value);
       if (isNaN(cur) || cur === 0) return; // nothing meaningful to negate yet

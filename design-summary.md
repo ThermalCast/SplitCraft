@@ -446,6 +446,15 @@ container gets exactly **one** listener per event type, attached once by
   *initial* state, previously set by an eager `sync()` call at wiring time,
   is instead baked directly into the button's markup — every render already
   knows the sign of the value it's about to draw.
+- The DOM contract between the two: a `.sign-btn` is immediately followed
+  by its weight input's `.weight-field` wrapper (see "Weight field: unit
+  suffix + per-side note"), so the button and the input are NOT direct
+  siblings. `weightInputAfter()` steps from the button into the wrapper to
+  find the input, and `syncSignClass()` steps from the input out to the
+  wrapper to find the button. Both used to assume direct siblings, and
+  introducing the wrapper silently broke the ± toggle everywhere until they
+  were taught to look through it; `tests/ui.mjs` now models the wrapped
+  structure rather than wiring the two as bare siblings.
 
 ### Workout session (auto-start, or Start/Complete Warm-up)
 
@@ -562,9 +571,31 @@ a tick, its name, and a one-line digest of the sets; it does not move in the
 list, so the running order stays the order on the screen. A chevron expands
 it again — done rows keep their inline weight/rep editing and delete button.
 `expandedExercises` survives the re-render every log triggers, so re-opening
-one doesn't snap shut. **The next incomplete exercise is scrolled into
-view** after a log, using `block: 'nearest'` (a no-op if already visible),
-gated behind `revealNextOnRender` so it never fires on first paint.
+one doesn't snap shut. **The exercise just logged is scrolled into view**
+after a log, using `block: 'nearest'` (a no-op if already visible), gated
+behind `revealNextOnRender` so it never fires on first paint.
+
+`revealNextOnRender` holds the exerciseId just logged, not a bare flag. The
+first version of this always revealed the FIRST incomplete card in plan
+order — correct for working a plan top-to-bottom, but wrong for anyone who
+doesn't: logging a set on the fourth exercise snapped the view straight
+back to the first, which was sitting incomplete on purpose (skipped for
+later, or simply not reached yet in a busy gym where whatever station is
+free gets done next). The render loop that builds each card already
+computes its `isComplete` state once, in order — building `cardOrder`
+(a plain array of `{exerciseId, isComplete}`, plan exercises then today's
+extras, the exact order the cards render in) from that same pass is free,
+and the reveal step uses it to answer the right question: find the
+exercise just logged in that order, and if it still has sets left, reveal
+IT; only once it's actually done does the search move forward to whatever
+comes next. It never falls back to scanning from the top — an earlier
+"incomplete" card reached that way is one the lifter already chose to skip
+past, not something to be yanked back to. Each card also carries a stable
+`id="ex-card-{exerciseId}"` so the reveal step can look it up directly via
+`getElementById()` — the same "fetch by id rather than re-querying rendered
+HTML" convention the rest of this codebase already follows (see "Plan
+history" and "Settings" for the same pattern elsewhere) — rather than
+re-scanning the freshly-set `innerHTML` with `querySelectorAll()`.
 
 Row state reads at a glance: `.plan-log-row.done-set` (logged: green wash and
 rail, green-tinted set-number chip), `.plan-log-row.next-set` (the one row
@@ -651,6 +682,29 @@ opening an inline panel of previous sessions (date, days-ago, sets, volume)
 switching tabs. Today's sets are excluded (already on screen above), it's
 capped at ten sessions with a pointer to the History tab, and it renders on
 first open rather than every repaint.
+
+### Weight field: unit suffix + per-side note
+
+Every weight `<input>` — the next-set row, a done-set's inline edit, the
+drop/myo modal's entry rows, the History tab's inline edit — is built
+through `weightFieldHtml(inputHtml, exercise)` (03-helpers.js), which wraps
+the given input in `.weight-field` and adds two things around it: the
+current unit (`kg`/`lb`) overlaid on the input's own right edge
+(`.weight-unit`), and, for a `perSide` exercise, the "per side" reminder
+(`perSideNoteHtml()`) on its own line directly underneath.
+
+Both pieces replace an earlier approach that read fine as a diagram but not
+in practice. The unit used to be only a `placeholder` on the empty
+next-set row — which, being a placeholder, disappeared the moment a value
+was typed, i.e. exactly when "what unit is this?" stops being answerable by
+glancing at an empty box you've already filled. The overlay persists
+regardless of what's typed, so it's never spliced into the value text
+itself and never interferes with editing. The per-side note used to sit
+inline, as its own flex item wedged between the weight and reps inputs —
+a third, unlabeled-looking field competing with reps for the row's width,
+with no visual tie to which field it was actually about. Underneath the
+field it belongs to is unambiguous, and the reps input stops being squeezed
+by a pill that has nothing to do with it.
 
 ### Supersets (paired exercises)
 
@@ -1300,12 +1354,17 @@ history came from hand-entry or an import.
 **Visible wherever a weight gets typed.** Every weight `<input>` for logging
 or editing a set — the active-workout next-set row, its done-set inline
 edit, the drop/myo modal's entry rows, and the History tab's inline edit —
-shows a small dim "per side" pill next to the field for a `perSide`
-exercise (`perSideNoteHtml(exercise)`, 03-helpers.js, shared by all four
-render sites so the wording can't drift between them). It's a reminder of
-what the app is about to do with the number, not an instruction — the field
-itself is untouched; you still type what's on one dumbbell, exactly as
-before.
+shows a small dim "per side" pill for a `perSide` exercise
+(`perSideNoteHtml(exercise)`, 03-helpers.js). It's a reminder of what the
+app is about to do with the number, not an instruction — the field itself
+is untouched; you still type what's on one dumbbell, exactly as before.
+
+All four sites build this through the shared `weightFieldHtml(inputHtml,
+exercise)` (03-helpers.js), which wraps the given input's own markup with
+the unit (`kg`/`lb`) overlaid on its right edge and, if the exercise is
+`perSide`, the note on its own line underneath — see "Weight field: unit
+suffix + per-side note" under Active workout below for why it's laid out
+this way instead of inline.
 
 ## AI plan generation (OpenRouter)
 

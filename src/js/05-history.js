@@ -60,8 +60,7 @@
         row.innerHTML = `
           <span class="set-idx">${i + 1}</span>
           ${s.entries[0].weight < 0 ? `<button type="button" class="sign-btn negative" data-action="toggle-sign" title="Toggle negative \u2014 for assisted reps, enter how much weight is taken off you">\u00b1</button>` : ''}
-          <input type="number" inputmode="decimal" step="0.5" class="set-edit-weight" data-action="edit-set" aria-label="Weight" value="${displayWeight(s.entries[0].weight)}">
-          ${perSideNoteHtml(exercise)}
+          ${weightFieldHtml(`<input type="number" inputmode="decimal" step="0.5" class="set-edit-weight" data-action="edit-set" aria-label="Weight" value="${displayWeight(s.entries[0].weight)}">`, exercise)}
           <input type="number" inputmode="numeric" step="1" min="1" class="set-edit-reps" data-action="edit-set" aria-label="Reps" value="${s.entries[0].reps}">
           ${delBtn}
         `;
@@ -132,9 +131,11 @@
   // re-render that follows every log, so fixing a mis-logged set doesn't get
   // undone by the refresh it triggers.
   const expandedExercises = new Set();
-  // Set by the log handlers, consumed by the next render. Without it the
-  // reveal would also fire on first paint and scroll a freshly opened page
-  // down past the session card for no reason.
+  // Set by the log handlers to the exerciseId just logged (not a bare
+  // flag -- see its use in 09-workout.js for why), consumed by the next
+  // render. `false` means no reveal: without that, the reveal would also
+  // fire on first paint and scroll a freshly opened page down past the
+  // session card for no reason.
   let revealNextOnRender = false;
 
   function ymd(d) {
