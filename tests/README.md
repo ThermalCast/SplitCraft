@@ -8,12 +8,13 @@ code is exercised rather than a reimplementation of it.
 
 | file | what it covers |
 | --- | --- |
-| `harness.mjs` | Loads `splitcraft.html`, extracts the script, runs it in a `vm` context with a stub DOM. IndexedDB is deliberately absent, which drives the in-memory fallback. Exports the app's top-level functions. |
+| `harness.mjs` | Loads `splitcraft.html`, extracts the script, runs it in a `vm` context with a stub DOM. IndexedDB is deliberately absent, which drives the in-memory fallback. Exports the app's top-level functions. The stub History panel reports itself active, since History only renders while its tab is showing. |
 | `test.mjs` | Classifiers against the real Fitbod export, catalog/classifier agreement, and the progression maths. |
 | `gen.mjs` | The whole plan-generation path with a stubbed OpenRouter, including that a fixed set count is actually enforced. |
 | `ui.mjs` | Seeds demo data, re-renders every tab, then **fires every handler** the render paths left behind — both `onclick`/`onchange`/`oninput` properties and every delegated `data-action` handler, called directly via `actionRegistries()`. |
 | `timing.mjs` | Overlapping writes and real elapsed time — the two things the suites above structurally cannot see. |
 | `features.mjs` | Backup round-trip and validation, encrypted backups, the share-sheet/download/Dropbox delivery paths, ramped-set progression, the session time model, and the start-of-week plan prompt. |
+| `browser.mjs` | The built app in a **real** headless Chrome/Edge over the DevTools protocol — real IndexedDB, real DOM. Skips itself when no browser is installed (`CHROME_PATH` picks one). |
 | `docs.mjs` | Whether `design-summary.md` still describes the code. Reads the files, not the app. |
 
 ## Why it is shaped this way
@@ -58,6 +59,11 @@ Each suite was validated by reintroducing a real bug and confirming it fails:
 | a new setting never documented | `docs.mjs` — *undocumented: brandNewUndocumentedKey* |
 | API key allowed into the backup file | `features.mjs` — *backup EXCLUDES the OpenRouter API key* |
 | week dismissal stored as a boolean, not a week key | `features.mjs` — *a dismissal from an earlier week does NOT carry over* |
+| a generated id never reaching the saved object | `browser.mjs` — *{"returned":1,"onObject":"undefined"}* |
+| a double-tapped delete removing the next set too | `browser.mjs` — *[110]* |
+| restore clearing everything before a write that failed | `browser.mjs` — *plans: 2 → 0* |
+| the suggestion re-judging today's half-finished session | `ui.mjs` — *"Stay at 143.3lb, aim for 14 reps." -> "Stay at 66.1lb, aim for 11 reps."* |
+| per-side lifts progressing at twice the intended rate | `test.mjs` — *a perSide lift progresses at the same real-load rate...* |
 
 None of the first three is visible to static analysis: the brackets balance,
 and in two of them the identifier genuinely exists — just not there, or not yet.
@@ -83,3 +89,22 @@ both of them hid a real bug that shipped:
 first, and real `await sleep()` with **zero ticks delivered** for the second —
 which is precisely the backgrounded-tab case, since the stubbed `setInterval`
 never calls anything back.
+
+## The blind spot `browser.mjs` exists for
+
+The harness's in-memory database and stub elements differ from a browser in
+ways that hid real, shipped bugs:
+
+- The in-memory `addRecord()`/`putRecord()` set `record.id`; IndexedDB never
+  does — it keys its own structured clone. Every test saw an id where a phone
+  saw `undefined`, which silently broke the active-plan setting and the RIR
+  answer for a day's first set.
+- Stub elements have no real siblings or parents. A markup change that put the
+  weight input inside a wrapper broke the ± button's sibling lookup on every
+  device while `ui.mjs` — which wires its own stub siblings — still passed.
+- A multi-store restore only shows whether it is all-or-nothing against a real
+  transaction.
+
+`browser.mjs` checks exactly these against the real thing. It runs in a few
+seconds, uses a throwaway profile and port, and skips (rather than fails)
+where no browser is installed.

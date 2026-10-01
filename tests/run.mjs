@@ -16,7 +16,9 @@ if (!process.env.APP) {
   }
 }
 
-const suites = ['test.mjs', 'gen.mjs', 'ui.mjs', 'timing.mjs', 'features.mjs', 'docs.mjs'];
+// browser.mjs drives a real headless Chrome/Edge (and skips itself if there
+// isn't one installed) — see its header for what the vm-sandbox suites can't see.
+const suites = ['test.mjs', 'gen.mjs', 'ui.mjs', 'timing.mjs', 'features.mjs', 'browser.mjs', 'docs.mjs'];
 let bad = 0;
 for (const s of suites) {
   console.log(`\n=== ${s} ===`);

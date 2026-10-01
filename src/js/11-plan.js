@@ -753,12 +753,24 @@ ${schemaExample}`;
       if (!Array.isArray(day.exercises)) {
         throw new Error(`The model returned a day ("${day.name || 'unnamed'}") with no exercise list — try again.`);
       }
+      // An entry with no usable name can't be matched to anything, and used
+      // to be saved as a brand-new exercise with no name at all.
+      const named = day.exercises.filter(ex => ex && typeof ex.name === 'string' && ex.name.trim());
+      if (named.length < day.exercises.length) {
+        logPlanStatus(`Skipped ${day.exercises.length - named.length} unnamed exercise entr${day.exercises.length - named.length === 1 ? 'y' : 'ies'} in "${day.name || 'a day'}".`);
+      }
+      day.exercises = named;
       for (const ex of day.exercises) {
+        ex.name = ex.name.trim();
         const key = nameKey(ex.name);
         let match = byName.get(key);
         if (!match) {
-          const newId = await addRecord('exercises', { name: ex.name, primaryMuscle: 'unclassified', secondaryMuscles: [], equipment: classifyEquipmentFromName(ex.name), custom: true });
-          match = { id: newId, name: ex.name, primaryMuscle: 'unclassified' };
+          // Same name-based guess the Fitbod importer makes. 'unclassified'
+          // put every invented exercise into the weekly-sets chart's
+          // Unclassified bar until someone fixed it by hand.
+          const primaryMuscle = classifyMuscleFromName(ex.name);
+          const newId = await addRecord('exercises', { name: ex.name, primaryMuscle, secondaryMuscles: [], equipment: classifyEquipmentFromName(ex.name), custom: true });
+          match = { id: newId, name: ex.name, primaryMuscle };
           byName.set(key, match);
           createdExerciseIds.push(newId);
         }
@@ -941,19 +953,25 @@ ${schemaExample}`;
 
     logPlanStatus(`Estimating starting weights for ${needed.length} new exercise(s) from ${anchors.length} logged lift(s)…`);
 
+    // perSide lifts are logged as ONE dumbbell's weight (see effectiveLoadKg(),
+    // 08-progression.js), and nothing in a bare number says so — the model
+    // was told to "match how their existing dumbbell entries are expressed"
+    // with no way to tell which convention any of them used. Labelled
+    // explicitly instead, both ways.
+    const PER_HAND = ' per hand (one dumbbell — the real load is double)';
     const prompt = `This lifter is ${experience}. ${bw} All weights are KILOGRAMS.
 
 Their most recent top set on each exercise they have actually trained:
-${anchors.map(a => `${describe(a.rec)}: ${Math.round(a.weight * 100) / 100}kg`).join('\n')}
+${anchors.map(a => `${describe(a.rec)}: ${Math.round(a.weight * 100) / 100}kg${a.rec.perSide ? PER_HAND : ''}`).join('\n')}
 
 They are about to start these exercises for the FIRST time:
-${needed.map(n => `${describe(n.rec)} — target ${n.repRangeMin}-${n.repRangeMax} reps`).join('\n')}
+${needed.map(n => `${describe(n.rec)} — target ${n.repRangeMin}-${n.repRangeMax} reps${n.rec.perSide ? ' [per hand]' : ''}`).join('\n')}
 
 For each one, estimate a sensible working weight for their FIRST session, in kilograms, based on the strength they have demonstrated above and the normal strength relationships between these movements.
 
 Rules:
 - Err on the LIGHT side. A first set that is too light costs nothing; too heavy on an unfamiliar movement risks injury.
-- Give the weight the way this app logs it: for dumbbell exercises, match how their existing dumbbell entries above are expressed.
+- For an exercise marked [per hand], give the weight of ONE dumbbell. For everything else, give the total load.
 - For assisted machines (assisted pull-up/dip), give a NEGATIVE number: the amount of assistance.
 - Use 0 only if the movement is genuinely unloaded.
 - Every name must be copied EXACTLY from the list above.
@@ -981,7 +999,11 @@ Respond with ONLY valid JSON, no markdown, exactly:
     // lifter has ever logged, so that — with a little headroom — is the
     // ceiling. Anything outside it is DROPPED, not clamped: the heuristic
     // then fills the gap and the log says which ones were rejected.
-    const heaviest = anchors.reduce((m, a) => Math.max(m, a.weight), 0);
+    // In real (total) load on both sides of the comparison, so a per-hand
+    // anchor isn't half its true size and a per-hand estimate isn't let
+    // through at double the intended ceiling.
+    const realKg = (rec, kg) => (rec.perSide ? kg * 2 : kg);
+    const heaviest = anchors.reduce((m, a) => Math.max(m, realKg(a.rec, a.weight)), 0);
     const ceiling = heaviest > 0 ? heaviest * 1.25 : 0;
 
     const byKey = new Map(needed.map(n => [nameKey(n.rec.name), n.rec]));
@@ -1000,8 +1022,8 @@ Respond with ONLY valid JSON, no markdown, exactly:
         }
       } else if (kg < 0) {
         rejected.push(`${rec.name}: negative weight on a non-assisted lift`); continue;
-      } else if (ceiling > 0 && kg > ceiling) {
-        rejected.push(`${rec.name}: ${kg}kg exceeds ${Math.round(ceiling)}kg (1.25x your heaviest logged set)`); continue;
+      } else if (ceiling > 0 && realKg(rec, kg) > ceiling) {
+        rejected.push(`${rec.name}: ${kg}kg${rec.perSide ? ' per hand' : ''} exceeds ${Math.round(ceiling)}kg (1.25x your heaviest logged set)`); continue;
       }
       // Snap to something the equipment can actually be loaded to.
       const step = loadStepKg(rec);

@@ -26,18 +26,15 @@
     return toKg(displayedValue);
   }
 
-  // allowDelete is false for History rows: past days render without a delete
-  // button at all \u2014 once a day isn't today anymore, DELETION is locked. This
-  // flag governs deletion and nothing else.
+  // History rows have no delete button: past days are delete-locked (see
+  // "History is delete-locked" in the design summary). Today's sets are
+  // deleted from the active workout's own card.
   //
   // Inline weight/reps editing of standard sets deliberately still works in
-  // History (see "History is delete-locked" in the design summary): fixing a
-  // number you fat-fingered last Tuesday is cheap and reversible, whereas
-  // deleting a set you no longer have any record of is not. The comment here
-  // used to claim the whole row was "locked in ... only today's log stays
-  // correctable", which described neither the code nor the intent and made the
-  // live inputs in History look like a leak rather than a feature.
-  function renderExerciseGroup(exercise, exEntry, workoutId, allowDelete = true) {
+  // History: fixing a number you fat-fingered last Tuesday is cheap and
+  // reversible, whereas deleting a set you no longer have any record of is
+  // not.
+  function renderExerciseGroup(exercise, exEntry, workoutId) {
     const wrap = document.createElement('div');
     wrap.className = 'exercise-group';
     const title = document.createElement('div');
@@ -46,14 +43,12 @@
     wrap.appendChild(title);
     exEntry.sets.forEach((s, i) => {
       const row = document.createElement('div');
-      const delBtn = allowDelete
-        ? `<button class="del" data-wid="${workoutId}" data-exid="${exEntry.exerciseId}" data-idx="${i}" data-action="delete-set" title="Delete set">\u00d7</button>`
-        : '';
       if (s.type === 'standard') {
         row.className = 'plan-log-row done-set';
         row.dataset.wid = workoutId;
         row.dataset.exid = exEntry.exerciseId;
         row.dataset.idx = i;
+        row.dataset.ts = s.ts;
         // Full-precision stored weight, so a reps-only edit can put it back
         // untouched — see weightToStore().
         row.dataset.kg = s.entries[0].weight;
@@ -62,7 +57,6 @@
           ${s.entries[0].weight < 0 ? `<button type="button" class="sign-btn negative" data-action="toggle-sign" title="Toggle negative \u2014 for assisted reps, enter how much weight is taken off you">\u00b1</button>` : ''}
           ${weightFieldHtml(`<input type="number" inputmode="decimal" step="0.5" class="set-edit-weight" data-action="edit-set" aria-label="Weight" value="${displayWeight(s.entries[0].weight)}">`, exercise)}
           <input type="number" inputmode="numeric" step="1" min="1" class="set-edit-reps" data-action="edit-set" aria-label="Reps" value="${s.entries[0].reps}">
-          ${delBtn}
         `;
       } else {
         row.className = 'set-row';
@@ -70,7 +64,6 @@
         row.innerHTML = `
           <span class="set-idx">${i + 1}</span>
           <span class="set-data">${badge}${esc(formatSetLine(s))}</span>
-          ${delBtn}
         `;
       }
       wrap.appendChild(row);
@@ -438,6 +431,20 @@
   // Divided by the weeks you actually TRAINED in the range (first to last
   // session), not the calendar length of the range — picking "last year" with
   // eight months of data shouldn't dilute every number by a third.
+  //
+  // First-to-last alone comes up one gap short: N sessions spaced d days
+  // apart represent N×d days of training, but the span between the first
+  // and last is only (N−1)×d. Four weeks of Mon/Wed/Fri spans 25 days, which
+  // read as 3.6 weeks and overstated every sets-per-week bar by ~12%. Adding
+  // back one average gap gives the true N×d.
+  function trainingWeeks(dates) {
+    const distinct = [...new Set(dates)].sort();
+    if (distinct.length < 2) return 1;
+    const spanDays = (Date.parse(distinct[distinct.length - 1] + 'T00:00:00') - Date.parse(distinct[0] + 'T00:00:00')) / 86400000;
+    const avgGap = spanDays / (distinct.length - 1);
+    return Math.max(1, (spanDays + avgGap) / 7);
+  }
+
   function renderMuscleChart() {
     const el = document.getElementById('chart-muscles');
     const musclesById = Object.fromEntries(MUSCLES.map(m => [m.id, m]));
@@ -452,9 +459,7 @@
       .sort((a, b) => b.count - a.count);
     if (rows.length === 0) { el.innerHTML = '<div class="empty" style="border:none;">No sets in this range.</div>'; return; }
 
-    const dates = historyRanged.map(w => w.date).sort();
-    const spanDays = (Date.parse(dates[dates.length - 1] + 'T00:00:00') - Date.parse(dates[0] + 'T00:00:00')) / 86400000;
-    const weeks = Math.max(1, spanDays / 7);
+    const weeks = trainingWeeks(historyRanged.map(w => w.date));
     const perWeek = r => r.count / weeks;
     const max = Math.max(...rows.map(perWeek));
 
@@ -658,10 +663,13 @@
     delegate(el, 'click', PROGRESS_CHART_ACTIONS);
   }
 
+  // The History tab's own controls only change what History shows, so they
+  // rebuild just History rather than putting the whole app through
+  // refreshLogAndHistory().
   document.getElementById('history-range').addEventListener('change', (e) => {
     historyRangeDays = e.target.value === 'all' ? null : Number(e.target.value);
     historyShowAll = false;
-    refreshLogAndHistory();
+    refreshHistoryTab();
   });
   // Only the progress chart depends on this, so re-render just that rather
   // than putting the whole app through refreshLogAndHistory.
@@ -674,7 +682,7 @@
     historyMuscleId = e.target.value;
     renderMuscleTrendChart();
   });
-  // Debounced: refreshLogAndHistory() re-renders four charts and the whole
+  // Debounced: a History rebuild re-renders five charts and the whole
   // session list, and doing that per keystroke on a phone is visibly janky.
   let historySearchTimer = null;
   document.getElementById('history-search').addEventListener('input', (e) => {
@@ -683,35 +691,16 @@
     historySearchTimer = setTimeout(() => {
       historySearch = value;
       historyShowAll = false;   // a new filter starts at the top of its own list
-      refreshLogAndHistory();
+      refreshHistoryTab();
     }, 200);
   });
 
   // Delegated actions for #history-list, wired once (see delegate() in
   // 03-helpers.js) instead of the three `querySelectorAll(...).forEach(...)`
-  // passes this used to run on every repaint.
-  //
-  // 'delete-set' mirrors the pre-existing wiring for `button.del` inside
-  // this container: renderExerciseGroup() is always called here with
-  // allowDelete=false (see "History is delete-locked" in the design
-  // summary), so no delete button is ever actually rendered in this list —
-  // the action exists for symmetry with the active workout's identical
-  // handler and is harmless dead wiring either way, exactly as the old
-  // per-render forEach was.
+  // passes this used to run on every repaint. No 'delete-set': History never
+  // renders a delete button (see renderExerciseGroup()).
   const HISTORY_CLICK_ACTIONS = {
-    'delete-set': async (el) => {
-      const today = todayStr();
-      const exerciseId = Number(el.dataset.exid);
-      const removed = await deleteSet(Number(el.dataset.wid), exerciseId, Number(el.dataset.idx));
-      refreshLogAndHistory();
-      if (removed) {
-        toast('Set deleted', 'ok', { duration: 6000, action: { label: 'Undo', onClick: async () => {
-          await restoreSet(today, exerciseId, removed);
-          await refreshLogAndHistory();
-        } } });
-      }
-    },
-    'load-more': () => { historyShowAll = true; refreshLogAndHistory(); },
+    'load-more': () => { historyShowAll = true; refreshHistoryTab(); },
     'toggle-sign': TOGGLE_SIGN_ACTIONS['toggle-sign'],
   };
   // Fires on `change` (blur/Enter) for the weight/reps inputs of an
@@ -735,8 +724,9 @@
       const workoutId = Number(row.dataset.wid);
       const exerciseId = Number(row.dataset.exid);
       const setIndex = Number(row.dataset.idx);
+      const ts = row.dataset.ts ? Number(row.dataset.ts) : undefined;
       const originalKg = parseFloat(row.dataset.kg);
-      await updateStandardSet(workoutId, exerciseId, setIndex, weightToStore(weight, originalKg), reps);
+      await updateStandardSet(workoutId, exerciseId, setIndex, weightToStore(weight, originalKg), reps, ts);
       refreshLogAndHistory();
     },
   };
@@ -750,16 +740,59 @@
     'edit-set': (el) => syncSignClass(el),
   };
 
+  // The header's date line. Re-rendered on every refresh rather than set once
+  // at load: an installed app can sit in the background for days and come
+  // back without reloading, still announcing the day it was opened.
+  function renderTodayLabel() {
+    const el = document.getElementById('today-label');
+    if (el) el.textContent = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+  }
+  // The calendar date of the last refreshLogAndHistory() — compared on
+  // returning to the app (12-init.js) to notice that the day has changed
+  // underneath a screen that hasn't.
+  let lastRefreshDate = null;
+
+  // History is rebuilt only while its tab is showing. Every logged set ends
+  // in refreshLogAndHistory(), and History was rebuilding its whole session
+  // list and all five charts on each one — work nobody could see from the
+  // Workout tab. While hidden it's just marked stale, and showTab()
+  // (03-helpers.js) renders it on the way in.
+  let historyStale = true;
+  function historyTabVisible() {
+    const panel = document.getElementById('panel-history');
+    return !!(panel && panel.classList && panel.classList.contains('active'));
+  }
+  async function refreshHistoryTab(workouts, exercisesById) {
+    const allWorkouts = workouts || await getAllWorkouts();
+    const byId = exercisesById || Object.fromEntries((await getAllRecords('exercises')).map(e => [e.id, e]));
+    renderHistoryTab(allWorkouts, byId);
+    historyStale = false;
+  }
+
   async function refreshLogAndHistory() {
     const workouts = await getAllWorkouts();
     const exercises = await getAllRecords('exercises');
     const exercisesById = Object.fromEntries(exercises.map(e => [e.id, e]));
     const today = todayStr();
+    renderTodayLabel();
+    lastRefreshDate = today;
 
     const todayWorkout = workouts.find(w => w.date === today);
     const volumeKg = todayWorkout ? workoutStats(todayWorkout, exercisesById).volumeKg : 0;
     document.getElementById('volume-value').textContent = `${Math.round(fromKg(volumeKg)).toLocaleString()} ${weightUnit}`;
 
+    if (historyTabVisible()) await refreshHistoryTab(workouts, exercisesById);
+    else historyStale = true;
+
+    // All three reuse the `workouts` array read at the top of this function
+    // rather than each re-reading the whole store.
+    await renderWeekProgress(workouts);
+    await refreshSessionCard();
+    await refreshActiveWorkoutSection(workouts);
+  }
+
+  function renderHistoryTab(workouts, exercisesById) {
+    const today = todayStr();
     const historyList = document.getElementById('history-list');
     historyList.innerHTML = '';
 
@@ -847,7 +880,7 @@
 
         const body = document.createElement('div');
         body.className = 'session-body';
-        w.exercises.forEach(ex => body.appendChild(renderExerciseGroup(exercisesById[ex.exerciseId], ex, w.id, false)));
+        w.exercises.forEach(ex => body.appendChild(renderExerciseGroup(exercisesById[ex.exerciseId], ex, w.id)));
         det.appendChild(body);
         historyList.appendChild(det);
       }
@@ -864,10 +897,4 @@
     delegate(historyList, 'click', HISTORY_CLICK_ACTIONS);
     delegate(historyList, 'change', HISTORY_CHANGE_ACTIONS);
     delegate(historyList, 'input', HISTORY_INPUT_ACTIONS);
-
-    // All three reuse the `workouts` array read at the top of this function
-    // rather than each re-reading the whole store.
-    await renderWeekProgress(workouts);
-    await refreshSessionCard();
-    await refreshActiveWorkoutSection(workouts);
   }

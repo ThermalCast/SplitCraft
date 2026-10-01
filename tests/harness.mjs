@@ -71,6 +71,7 @@ const document = {
 const sandbox = {
   document, console,
   window: {
+    scrollTo(){},
     addEventListener(ev, fn) { listeners.set('window:' + ev, { [ev]: fn }); },
     matchMedia: () => ({ matches: false, addEventListener(){} }),
     AudioContext: function () { throw new Error('no audio'); },
@@ -130,6 +131,11 @@ const sandbox = {
   Blob: globalThis.Blob, File: globalThis.File, URL: globalThis.URL,
 };
 sandbox.window.document = document;
+// History renders lazily — only while its tab is showing (historyTabVisible(),
+// 05-history.js). Every suite that inspects History's output expects it
+// rendered, so the stub panel reports itself active. features.mjs flips this
+// off to test the lazy path itself.
+document.getElementById('panel-history').classList.contains = (c) => c === 'active';
 sandbox.globalThis = sandbox;
 sandbox.self = sandbox;
 

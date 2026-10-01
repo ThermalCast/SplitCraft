@@ -1115,7 +1115,7 @@
   </div>
 
   <div class="storage-warning" id="storage-warning">
-    Local storage isn't available in this preview environment — data won't persist here. Deploy this file to your own hosting to test real persistence.
+    This browser isn't letting SplitCraft save data right now (private browsing, or site storage blocked), so anything logged will be lost when this page closes. Export a backup from Settings before you close it.
   </div>
 
   <!-- ===== LOG TAB ===== -->
@@ -1576,7 +1576,7 @@
                two above — see the comment above the Dropbox subsystem in
                06-catalog-import-backup.js for why an OAuth credential is
                acceptable here when it wasn't for Drive or a GitHub token. -->
-          <button type="button" class="primary-btn" id="backup-dropbox-btn">Connect Dropbox…</button>
+          <button type="button" class="primary-btn" id="backup-dropbox-btn" style="display:none;">Connect Dropbox…</button>
         </div>
         <div class="hint" id="backup-export-status"></div>
         <div class="hint" id="dropbox-status"></div>

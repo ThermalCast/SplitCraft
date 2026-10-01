@@ -265,6 +265,7 @@
     fitnessBtn.style.display = (await getSetting('appleFitnessShortcutName', '')).trim() ? 'block' : 'none';
 
     display.classList.remove('idle', 'running');
+    display.title = '';
     if (!workout || !workout.startedAt) {
       display.textContent = 'Not started';
       display.classList.add('idle');
@@ -283,7 +284,11 @@
     } else {
       display.textContent = formatDuration(workout.durationMs);
       display.title = 'Completed';
-      startBtn.textContent = 'Start New Session';
+      // "Resume", not "Start New": pressing it keeps today's original
+      // startedAt (see startWorkoutSessionLocked()), so the clock carries on
+      // from the morning's start rather than counting from zero, which is
+      // what an accidental early Complete wants.
+      startBtn.textContent = 'Resume Session';
       startBtn.style.display = 'block';
       startHint.style.display = 'none';
       completeBtn.style.display = 'none';

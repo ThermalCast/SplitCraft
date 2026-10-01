@@ -67,7 +67,9 @@
   async function renderExercisePickerBody(query) {
     const body = document.getElementById('exercise-picker-body');
     const groups = await groupedExercisesForPicker();
-    const q = query.trim().toLowerCase();
+    // nameKey(), like every other name match in the app, so "pull up" finds
+    // "Pull-Up".
+    const q = nameKey(query);
     let html;
     if (q) {
       // Searching flattens the muscle hierarchy — useful for browsing when
@@ -75,7 +77,7 @@
       // a name you already know.
       const matches = [];
       groups.forEach(g => g.exercises.forEach(ex => {
-        if (!exercisePickerExcludeIds.has(ex.id) && ex.name.toLowerCase().includes(q)) matches.push(ex);
+        if (!exercisePickerExcludeIds.has(ex.id) && nameKey(ex.name).includes(q)) matches.push(ex);
       }));
       matches.sort((a, b) => a.name.localeCompare(b.name));
       html = matches.length
@@ -141,6 +143,12 @@
     // an existing exercise instead of forking a near-miss duplicate that
     // would split that lift's history in two.
     const existing = (await getAllRecords('exercises')).find(ex => nameKey(ex.name) === nameKey(name));
+    // Typing a name the list deliberately left out (it's already on the day)
+    // must not sneak it in through the back door.
+    if (existing && exercisePickerExcludeIds.has(existing.id)) {
+      toast(`"${existing.name}" is already part of this day`, 'err');
+      return;
+    }
     const id = existing ? existing.id : await addRecord('exercises', { name, primaryMuscle: muscle, secondaryMuscles: [], equipment: classifyEquipmentFromName(name), custom: true });
     invalidateExercisePicker();
     const cb = exercisePickerOnSelect;
@@ -241,6 +249,7 @@
     if (logged) await announcePersonalRecord(exerciseId, activeWorkoutCtx.exercisesById[exerciseId], activeWorkoutCtx.allWorkouts, logged.sets[logged.sets.length - 1]);
     closeDropMyoModal();
     startRestTimer();
+    noteWorkoutActivity();
     await refreshLogAndHistory();
     await maybeAutoStartAppleFitness(workout);
   });
@@ -409,6 +418,7 @@
         if (isFirstOfActiveSupersetPair(day, origExerciseId, workout.exerciseSwaps, supersetsOn)) hideTimerSheet();
         else if (shouldRestAfter(done, prescribed)) startRestTimer();
         else hideTimerSheet();
+        noteWorkoutActivity();
         revealNextOnRender = exerciseId;
         await refreshLogAndHistory();
         await maybeAutoStartAppleFitness(workout);
@@ -424,11 +434,19 @@
       await refreshActiveWorkoutSection();
     },
     'delete-set': async (el) => {
+      // Addressed by the set's own ts (deleteSet() falls back to the index
+      // only if a row somehow lacks one), so a second tap that lands before
+      // the repaint finds its set already gone and does nothing — by index
+      // it deleted the NEXT set. Disabled for the same reason the Log button
+      // is: one tap, one action.
+      if (el.disabled) return;
+      el.disabled = true;
       const today = activeWorkoutCtx.today;
       const w = await getWorkoutForDate(today);
       if (!w) return;
       const exerciseId = Number(el.dataset.exid);
-      const removed = await deleteSet(w.id, exerciseId, Number(el.dataset.idx));
+      const ts = el.dataset.ts ? Number(el.dataset.ts) : undefined;
+      const removed = await deleteSet(w.id, exerciseId, Number(el.dataset.idx), ts);
       await refreshLogAndHistory();
       if (removed) {
         toast('Set deleted', 'ok', { duration: 6000, action: { label: 'Undo', onClick: async () => {
@@ -467,9 +485,17 @@
       if (!group) return;
       const origExerciseId = Number(group.dataset.origExid);
       const currentEffectiveId = Number(group.dataset.exid);
+      // Everything already on today's list is off the table — picking one
+      // gave two cards the same exercise id, which the whole Log tab
+      // addresses sets by (the Plan tab's Swap already excluded its day).
+      // The slot's own planned exercise stays pickable, so a swap can be
+      // undone by swapping back.
+      const excludeIds = exerciseIdsOnToday(activeWorkoutCtx);
+      excludeIds.delete(origExerciseId);
+      excludeIds.add(currentEffectiveId);
       await openExercisePicker({
         title: 'Swap for today',
-        excludeIds: new Set([currentEffectiveId]),
+        excludeIds,
         onSelect: async (newExerciseId) => {
           await setSessionSwap(origExerciseId, newExerciseId);
           await refreshActiveWorkoutSection();
@@ -515,10 +541,11 @@
       if (isNaN(weight) || isNaN(reps)) return;
       const exerciseId = Number(row.dataset.exid);
       const setIndex = Number(row.dataset.idx);
+      const ts = row.dataset.ts ? Number(row.dataset.ts) : undefined;
       const originalKg = parseFloat(row.dataset.kg);
       const w = await getWorkoutForDate(activeWorkoutCtx.today);
       if (!w) return;
-      await updateStandardSet(w.id, exerciseId, setIndex, weightToStore(weight, originalKg), reps);
+      await updateStandardSet(w.id, exerciseId, setIndex, weightToStore(weight, originalKg), reps, ts);
       await refreshLogAndHistory();
     },
   };
@@ -565,6 +592,12 @@
     // See the comment on activeWorkoutCtx's declaration above.
     activeWorkoutCtx = { plan, dayIdx, day, today, allWorkouts, exercisesById };
     const todayWorkout = allWorkouts.find(w => w.date === today) || null;
+    // The suggestion is a plan for TODAY'S session, so it's judged on the
+    // sessions before it. Fed today's half-finished sets too, it re-judged
+    // after every log: set 1 at 8 reps turned "try 102.5 × 8" into "Stay at
+    // 102.5, aim for 9 reps" (asking for MORE reps on the next set of the
+    // same session), and a logged warm-up re-anchored it on the warm-up.
+    const priorWorkouts = allWorkouts.filter(w => w.date !== today);
     // Read once for the whole render — the off switch (Settings → Workout)
     // gates both the pairing tag below and the rest-timer exception in
     // WORKOUT_CLICK_ACTIONS['log-set'], and both need to agree on it for the
@@ -598,7 +631,7 @@
         const swappedEx = exercisesById[swappedId];
         effectiveName = swappedEx ? swappedEx.name : slot.name;
       }
-      const suggestion = await suggestForExercise(effectiveExerciseId, slot.repRangeMin, slot.repRangeMax, slot.targetSets, allWorkouts, exercisesById);
+      const suggestion = await suggestForExercise(effectiveExerciseId, slot.repRangeMin, slot.repRangeMax, slot.targetSets, priorWorkouts, exercisesById);
       const exEntry = todayWorkout ? todayWorkout.exercises.find(e => e.exerciseId === effectiveExerciseId) : null;
       const todaySets = exEntry ? exEntry.sets : [];
       const doneCount = todaySets.length;
@@ -647,12 +680,12 @@
           const s = todaySets[i];
           if (s.type === 'standard') {
             setRowsHtml += `
-              <div class="plan-log-row done-set" data-exid="${effectiveExerciseId}" data-idx="${i}" data-kg="${s.entries[0].weight}">
+              <div class="plan-log-row done-set" data-exid="${effectiveExerciseId}" data-idx="${i}" data-ts="${s.ts}" data-kg="${s.entries[0].weight}">
                 <span class="set-idx">${setNum}</span>
                 ${signBtnHtml(s.entries[0].weight < 0)}
                 ${weightFieldHtml(`<input type="number" inputmode="decimal" step="0.5" class="set-edit-weight" data-action="edit-set" aria-label="Weight" value="${displayWeight(s.entries[0].weight)}">`, exercisesById[effectiveExerciseId])}
                 <input type="number" inputmode="numeric" step="1" min="1" class="set-edit-reps" data-action="edit-set" aria-label="Reps" value="${s.entries[0].reps}">
-                <button class="del" data-exid="${effectiveExerciseId}" data-idx="${i}" data-action="delete-set" title="Delete set">×</button>
+                <button class="del" data-exid="${effectiveExerciseId}" data-idx="${i}" data-ts="${s.ts}" data-action="delete-set" title="Delete set">×</button>
               </div>
             `;
           } else {
@@ -660,18 +693,25 @@
               <div class="set-row">
                 <span class="set-idx">${setNum}</span>
                 <span class="set-data">${esc(formatSetLine(s))}</span>
-                <button class="del" data-exid="${effectiveExerciseId}" data-idx="${i}" data-action="delete-set" title="Delete set">×</button>
+                <button class="del" data-exid="${effectiveExerciseId}" data-idx="${i}" data-ts="${s.ts}" data-action="delete-set" title="Delete set">×</button>
               </div>
             `;
           }
         } else if (i === doneCount) {
           const label = setNum > effectiveTarget ? `${setNum}+` : `${setNum}`;
-          const wVal = suggestion.weight != null ? displayWeight(suggestion.weight) : '';
-          const rVal = suggestion.reps != null ? suggestion.reps : '';
+          // Mid-session, the next set starts from the one just logged — what
+          // you actually loaded and managed today — rather than re-proposing
+          // the session's opening suggestion (which may be a weight you chose
+          // not to use). The first set of the day takes the suggestion.
+          const lastToday = doneCount ? workingEntry(todaySets[doneCount - 1]) : null;
+          const prefillKg = lastToday ? lastToday.weight : suggestion.weight;
+          const prefillReps = lastToday ? lastToday.reps : suggestion.reps;
+          const wVal = prefillKg != null ? displayWeight(prefillKg) : '';
+          const rVal = prefillReps != null ? prefillReps : '';
           setRowsHtml += `
             <div class="plan-log-row next-set">
               <span class="set-idx">${label}</span>
-              ${signBtnHtml(suggestion.weight != null && suggestion.weight < 0)}
+              ${signBtnHtml(prefillKg != null && prefillKg < 0)}
               ${weightFieldHtml(`<input type="number" inputmode="decimal" step="0.5" aria-label="Weight in ${weightUnit}" class="plan-log-weight" data-action="sync-sign" value="${wVal}">`, exercisesById[effectiveExerciseId])}
               <input type="number" inputmode="numeric" step="1" min="1" placeholder="reps" aria-label="Reps" class="plan-log-reps" value="${rVal}">
               <button type="button" class="log-btn" data-action="log-set">Log</button>
@@ -790,6 +830,23 @@
     delegate(container, 'input', WORKOUT_INPUT_ACTIONS);
   }
 
+  // Every exercise id with a card on today's list: the day's planned slots,
+  // whatever they've been swapped to today, and today's added extras. One
+  // card per exercise is the invariant everything here relies on, so this is
+  // what any "pick an exercise for today" excludes.
+  function exerciseIdsOnToday(ctx) {
+    const { day, allWorkouts, today } = ctx;
+    const todayWorkout = allWorkouts.find(w => w.date === today) || null;
+    const ids = new Set(day.exercises.map(ex => ex.exerciseId));
+    if (todayWorkout && todayWorkout.exerciseSwaps) {
+      Object.values(todayWorkout.exerciseSwaps).forEach(id => ids.add(id));
+    }
+    if (todayWorkout && todayWorkout.extraExercises) {
+      todayWorkout.extraExercises.forEach(ex => ids.add(ex.exerciseId));
+    }
+    return ids;
+  }
+
   // Opens the exercise picker to add an off-plan exercise to TODAY only,
   // as a normal card (target sets/rep range from Settings' plan defaults,
   // same as a fresh plan would use) rather than the old "Log a set
@@ -798,15 +855,8 @@
   // activeWorkoutCtx is always populated whenever this can actually fire.
   document.getElementById('add-exercise-btn').addEventListener('click', async () => {
     if (!activeWorkoutCtx) return;
-    const { plan, day, allWorkouts, today } = activeWorkoutCtx;
-    const todayWorkout = allWorkouts.find(w => w.date === today) || null;
-    const excludeIds = new Set(day.exercises.map(ex => ex.exerciseId));
-    if (todayWorkout && todayWorkout.exerciseSwaps) {
-      Object.values(todayWorkout.exerciseSwaps).forEach(id => excludeIds.add(id));
-    }
-    if (todayWorkout && todayWorkout.extraExercises) {
-      todayWorkout.extraExercises.forEach(ex => excludeIds.add(ex.exerciseId));
-    }
+    const { plan } = activeWorkoutCtx;
+    const excludeIds = exerciseIdsOnToday(activeWorkoutCtx);
     // "The normal set and rep range" means THIS plan's own — not whatever
     // the Plan tab's form currently holds, which can drift from the active
     // plan if it was edited without regenerating. Settings is only the
@@ -845,6 +895,19 @@
   // triggered by refreshLogAndHistory, instead of snapping back to whatever
   // today's workout record implies every time a set is logged.
   let selectedLogDayIdx = null;
+  // ...but only for the session it was chosen in. The pick used to live until
+  // a full reload, so an installed app resumed the next morning still showed
+  // yesterday's day instead of rotating to the next one. It's tied to the
+  // date it was chosen on and the last time the workout was touched, so a
+  // new day starts a fresh pick — except mid-workout across midnight, which
+  // keeps going on the day already being trained.
+  let selectedLogDayDate = null;
+  let lastWorkoutActivityTs = 0;
+  const DAY_PICK_IDLE_MS = 3 * 3600000;
+  function noteWorkoutActivity() { lastWorkoutActivityTs = Date.now(); }
+  function dayPickIsStale(pickDate, today, lastActivityTs, now) {
+    return pickDate != null && pickDate !== today && now - lastActivityTs > DAY_PICK_IDLE_MS;
+  }
 
   // `workouts` is optional and purely an optimisation — passed down by
   // refreshLogAndHistory(), which has already read the store, and omitted by
@@ -860,7 +923,9 @@
       return;
     }
     wrap.style.display = 'block';
+    if (dayPickIsStale(selectedLogDayDate, todayStr(), lastWorkoutActivityTs, Date.now())) selectedLogDayIdx = null;
     if (selectedLogDayIdx == null || selectedLogDayIdx >= plan.days.length) {
+      selectedLogDayDate = todayStr();
       const todayWorkout = workouts
         ? workouts.find(w => w.date === todayStr()) || null
         : await getWorkoutForDate(todayStr());
@@ -895,6 +960,8 @@
     // and the store may have moved on since the render that wired this.
     daySelect.onchange = async () => {
       selectedLogDayIdx = Number(daySelect.value);
+      selectedLogDayDate = todayStr();
+      noteWorkoutActivity();
       await renderActiveWorkout(plan, selectedLogDayIdx);
     };
     await renderActiveWorkout(plan, selectedLogDayIdx, workouts);

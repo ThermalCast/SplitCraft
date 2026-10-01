@@ -172,22 +172,21 @@
     });
   }
 
-  function idbAdd(store, record) {
+  // Writes settle on the TRANSACTION, not the request. A request's `success`
+  // only means the operation was queued without error; the transaction can
+  // still abort afterwards (QuotaExceededError on a full device surfaces
+  // exactly there), and resolving early reported a set as saved when it
+  // never reached disk.
+  function idbWrite(store, op) {
     return new Promise((resolve, reject) => {
       const tx = db.transaction(store, 'readwrite');
-      const req = tx.objectStore(store).add(record);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = (e) => reject(e.target.error);
+      const req = op(tx.objectStore(store));
+      tx.oncomplete = () => resolve(req.result);
+      tx.onabort = () => reject(tx.error || req.error || new Error(`Saving to "${store}" was rolled back`));
     });
   }
-  function idbPut(store, record) {
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(store, 'readwrite');
-      const req = tx.objectStore(store).put(record);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = (e) => reject(e.target.error);
-    });
-  }
+  function idbAdd(store, record) { return idbWrite(store, s => s.add(record)); }
+  function idbPut(store, record) { return idbWrite(store, s => s.put(record)); }
   function idbGet(store, key) {
     return new Promise((resolve, reject) => {
       const tx = db.transaction(store, 'readonly');
@@ -204,12 +203,32 @@
       req.onerror = (e) => reject(e.target.error);
     });
   }
-  function idbDelete(store, key) {
+  function idbDelete(store, key) { return idbWrite(store, s => s.delete(key)).then(() => {}); }
+
+  // Replaces the whole contents of several stores in ONE transaction, so it
+  // either all lands or none of it does. Restore needs exactly that: it
+  // clears your data before writing the backup's, and as separate
+  // transactions a failure (or the app being closed) partway through left the
+  // device with your old data gone and only part of the backup in its place.
+  // A synchronous throw from put() (an invalid key, an uncloneable value)
+  // would otherwise leave the already-queued clears to auto-commit, so it
+  // aborts explicitly.
+  function idbReplaceAll(contents) {
+    const stores = Object.keys(contents);
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(store, 'readwrite');
-      const req = tx.objectStore(store).delete(key);
-      req.onsuccess = () => resolve();
-      req.onerror = (e) => reject(e.target.error);
+      const tx = db.transaction(stores, 'readwrite');
+      tx.oncomplete = () => resolve();
+      tx.onabort = () => reject(tx.error || new Error('Restore was rolled back — nothing was changed'));
+      try {
+        for (const store of stores) {
+          const os = tx.objectStore(store);
+          os.clear();
+          for (const rec of contents[store]) os.put(rec);
+        }
+      } catch (e) {
+        try { tx.abort(); } catch (abortErr) { /* already finished */ }
+        reject(e);
+      }
     });
   }
 
@@ -253,9 +272,22 @@
     return workoutsCachePromise;
   }
 
+  // IndexedDB generates an auto-increment key on its own structured CLONE of
+  // the record, never on the caller's object — so after add()/put() of a new
+  // record, `record.id` was still undefined in a real browser, while the
+  // in-memory fallback (and therefore every test) did set it. Code that read
+  // `.id` straight off the object it had just saved got `undefined`: the
+  // active-plan setting after generating a plan, and the RIR answer for a
+  // day's first set, which then failed to save. Stamping it here makes both
+  // backends agree.
+  const AUTO_ID_STORES = new Set(['workouts', 'exercises', 'plans']);
+  function stampId(store, record, id) {
+    if (AUTO_ID_STORES.has(store) && record && record.id == null) record.id = id;
+    return id;
+  }
   async function addRecord(store, record) {
     if (store === 'workouts') invalidateWorkoutsCache();
-    if (dbAvailable) return idbAdd(store, record);
+    if (dbAvailable) return stampId(store, record, await idbAdd(store, record));
     const id = memory.nextId[store]++;
     record.id = id;
     memory[store].push(record);
@@ -263,7 +295,7 @@
   }
   async function putRecord(store, record) {
     if (store === 'workouts') invalidateWorkoutsCache();
-    if (dbAvailable) return idbPut(store, record);
+    if (dbAvailable) return stampId(store, record, await idbPut(store, record));
     const idx = memory[store].findIndex(r => r.id === record.id);
     if (idx >= 0) { memory[store][idx] = record; return record.id; }
     const id = memory.nextId[store]++;
@@ -316,12 +348,7 @@
       if (memory.nextId[store]) memory.nextId[store] = 1;
       return;
     }
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(store, 'readwrite');
-      const req = tx.objectStore(store).clear();
-      req.onsuccess = () => resolve();
-      req.onerror = (e) => reject(e.target.error);
-    });
+    return idbWrite(store, s => s.clear()).then(() => {});
   }
   // Settings (and only settings) are mirrored into localStorage alongside
   // IndexedDB. Two independent reasons:
@@ -433,6 +460,25 @@
     lsRemoveSetting(key);
     delete memory.settings[key];
     if (dbAvailable) return idbDelete('settings', key);
+  }
+
+  // Brings the cache and the localStorage mirror into line with a settings
+  // store that has just been REPLACED wholesale (restore). Every mirrored key
+  // not in `settings` has to go too: loadSettings() lets the mirror fill any
+  // gap in the primary store, so a leftover would quietly come back on the
+  // next launch.
+  function replaceSettingsLocally(settings) {
+    settingsCache.clear();
+    for (const [key, value] of Object.entries(settings)) settingsCache.set(key, value);
+    try {
+      const mirrored = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(LS_PREFIX)) mirrored.push(k);
+      }
+      mirrored.forEach(k => localStorage.removeItem(k));
+    } catch (e) { /* localStorage unavailable — nothing mirrored to clean */ }
+    for (const [key, value] of Object.entries(settings)) lsSetSetting(key, value);
   }
 
   // exercisePrefs is keyed by exerciseId (not autoIncrement), so it needs its
@@ -572,17 +618,29 @@
     return { ...workout, sessionJustStarted };
   }
 
+  // Index of the set to act on: by its own timestamp when the caller has one
+  // (unique within the day — see logSetLocked()), by position otherwise.
+  // Position alone is not an identity: the lock serialises a double-tapped
+  // delete, and the second call then removed whatever had slid into that
+  // position — the NEXT set. -1 means the set is already gone.
+  function setIndexFor(exEntry, setIndex, expectTs) {
+    if (expectTs == null) return exEntry.sets[setIndex] ? setIndex : -1;
+    return exEntry.sets.findIndex(s => s.ts === expectTs);
+  }
+
   // Returns the removed set (so a caller can offer an Undo), or `null` if
   // there was nothing to remove.
-  async function deleteSet(workoutId, exerciseId, setIndex) {
-    return withWorkoutLock(() => deleteSetLocked(workoutId, exerciseId, setIndex));
+  async function deleteSet(workoutId, exerciseId, setIndex, expectTs) {
+    return withWorkoutLock(() => deleteSetLocked(workoutId, exerciseId, setIndex, expectTs));
   }
-  async function deleteSetLocked(workoutId, exerciseId, setIndex) {
+  async function deleteSetLocked(workoutId, exerciseId, setIndex, expectTs) {
     const workout = await getRecord('workouts', workoutId);
     if (!workout) return null;
     const exEntry = workout.exercises.find(ex => ex.exerciseId === exerciseId);
     if (!exEntry) return null;
-    let [removed] = exEntry.sets.splice(setIndex, 1);
+    const idx = setIndexFor(exEntry, setIndex, expectTs);
+    if (idx === -1) return null;
+    let [removed] = exEntry.sets.splice(idx, 1);
     if (exEntry.sets.length === 0) workout.exercises = workout.exercises.filter(ex => ex.exerciseId !== exerciseId);
     // Keep the record if a session was EXPLICITLY started (Start Warm-up), a
     // today-only set-count override is set, or a session-only exercise swap
@@ -603,9 +661,20 @@
       // can't collide with a real set field (ts/type/entries/rir) and reads
       // as obviously-not-set-data to anything else that looks at `removed`;
       // restoreSetLocked strips it back off before the set is stored.
-      if (removed && workout.startedAt != null) {
-        removed = { ...removed, __deletedStartedAt: workout.startedAt, __deletedStartedAuto: !!workout.startedAuto };
+      //
+      // The plan link travels the same way. Without it the recreated record
+      // had planId null, so the day stopped counting as trained against the
+      // plan: the Log tab's rotation offered the same day again next time,
+      // and the next generation could prune a plan that had been used.
+      const stash = {};
+      if (workout.startedAt != null) {
+        stash.__deletedStartedAt = workout.startedAt;
+        stash.__deletedStartedAuto = !!workout.startedAuto;
       }
+      if (workout.planId != null) {
+        stash.__deletedPlanMeta = { planId: workout.planId, dayIndex: workout.dayIndex, dayName: workout.dayName };
+      }
+      if (removed && Object.keys(stash).length) removed = { ...removed, ...stash };
     } else {
       await putRecord('workouts', workout);
     }
@@ -635,19 +704,21 @@
     // Pull the session-start stamp (if deleteSetLocked attached one — see
     // its comment) off the set BEFORE it's touched again, and strip it so it
     // never ends up stored as if it were part of the set itself.
-    const { __deletedStartedAt: deletedStartedAt, __deletedStartedAuto: deletedStartedAuto, ...cleanSet } = set;
+    const { __deletedStartedAt: deletedStartedAt, __deletedStartedAuto: deletedStartedAuto,
+      __deletedPlanMeta: deletedPlanMeta, ...cleanSet } = set;
     let workout = await getWorkoutForDate(date);
     if (!workout) {
       // Recreating the record from scratch: restore the session-start fields
-      // it carried when deleted, or logging/rendering code sees a day with a
-      // set on it but a session that's "Not started". Only done here, on a
-      // fresh record — an EXISTING record's own startedAt/startedAuto must
-      // never be overwritten by an unrelated undo.
+      // and plan link it carried when deleted, or logging/rendering code sees
+      // a day with a set on it but a session that's "Not started", logged
+      // against no plan. Only done here, on a fresh record — an EXISTING
+      // record's own fields must never be overwritten by an unrelated undo.
       workout = { date, ts: Date.now(), planId: null, dayIndex: null, dayName: null, exercises: [] };
       if (deletedStartedAt != null) {
         workout.startedAt = deletedStartedAt;
         if (deletedStartedAuto) workout.startedAuto = true;
       }
+      if (deletedPlanMeta) Object.assign(workout, deletedPlanMeta);
     }
     let exEntry = workout.exercises.find(ex => ex.exerciseId === exerciseId);
     if (!exEntry) { exEntry = { exerciseId, sets: [] }; workout.exercises.push(exEntry); }
@@ -693,15 +764,17 @@
     await putRecord('workouts', workout);
   }
 
-  async function updateStandardSet(workoutId, exerciseId, setIndex, weightKg, reps) {
-    return withWorkoutLock(() => updateStandardSetLocked(workoutId, exerciseId, setIndex, weightKg, reps));
+  async function updateStandardSet(workoutId, exerciseId, setIndex, weightKg, reps, expectTs) {
+    return withWorkoutLock(() => updateStandardSetLocked(workoutId, exerciseId, setIndex, weightKg, reps, expectTs));
   }
-  async function updateStandardSetLocked(workoutId, exerciseId, setIndex, weightKg, reps) {
+  async function updateStandardSetLocked(workoutId, exerciseId, setIndex, weightKg, reps, expectTs) {
     const workout = await getRecord('workouts', workoutId);
     if (!workout) return;
     const exEntry = workout.exercises.find(ex => ex.exerciseId === exerciseId);
-    if (!exEntry || !exEntry.sets[setIndex]) return;
-    const set = exEntry.sets[setIndex];
+    if (!exEntry) return;
+    const idx = setIndexFor(exEntry, setIndex, expectTs);
+    if (idx === -1) return;
+    const set = exEntry.sets[idx];
     if (set.type !== 'standard') return;
     set.entries = [{ weight: weightKg, reps }];
     await putRecord('workouts', workout);

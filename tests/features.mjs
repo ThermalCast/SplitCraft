@@ -119,6 +119,30 @@ let rendered = true;
 try { await app.refreshLogAndHistory(); await app.refreshPlanTab(); } catch (e) { rendered = false; }
 check('the app re-renders from restored data', rendered);
 
+// Restore REPLACES settings ("Replace all data"), apart from the device-only
+// credentials that never travel in a file. A merge let a setting the backup
+// lacked survive — an activePlanId pointing at an id that, after restore,
+// named a different plan — and the localStorage mirror would resurrect any
+// leftover on the next launch even if the primary store were cleaned.
+{
+  await app.setSetting('activePlanId', 999);
+  await app.setSetting('openrouterKey', 'sk-or-device-only');
+  const withoutPlanPick = JSON.parse(JSON.stringify(snapshot.data));
+  delete withoutPlanPick.settings.activePlanId;
+  withoutPlanPick.settings.planNotes = 'from the backup';
+  await app.applyRestore(withoutPlanPick);
+  check('a setting the backup does not carry is removed by restore (no merge)',
+    (await app.getSetting('activePlanId', 'gone')) === 'gone', String(await app.getSetting('activePlanId', 'gone')));
+  check('...including from the localStorage mirror, so it can\'t come back on the next launch',
+    app.localStorage.getItem('ironlog.setting.activePlanId') === null);
+  check('the device\'s own API key survives a restore',
+    (await app.getSetting('openrouterKey', '')) === 'sk-or-device-only'
+    && app.localStorage.getItem('ironlog.setting.openrouterKey') === JSON.stringify('sk-or-device-only'));
+  check('the backup\'s own settings are applied',
+    (await app.getSetting('planNotes', '')) === 'from the backup');
+  await app.clearSetting('openrouterKey');
+}
+
 // ---------------------------------------------------------------------------
 // getAllWorkouts() must retry after a rejected read, not cache the rejection.
 //
@@ -207,14 +231,21 @@ check('the app re-renders from restored data', rendered);
     JSON.stringify(envelope.kdf));
 
   // --- Round trip, byte-for-byte. ---
+  // `plaintextBackup` and the payload inside `envelope` come from two separate
+  // buildBackup() calls, each stamped with its own `exportedAt` to the
+  // millisecond — so whenever the two calls straddled a millisecond boundary
+  // this failed for no reason at all (it flaked under load). Everything EXCEPT
+  // that stamp has to match exactly.
+  const sameApartFromStamp = (a, b) =>
+    JSON.stringify({ ...a, exportedAt: null }) === JSON.stringify({ ...b, exportedAt: null });
   const decrypted = await app.decryptBackupData(envelope, passphrase);
   check('encrypt -> decrypt returns the ORIGINAL payload byte-for-byte',
-    JSON.stringify(decrypted) === JSON.stringify(plaintextBackup));
+    sameApartFromStamp(decrypted, plaintextBackup) && typeof decrypted.exportedAt === 'string');
 
   // --- validateBackup() branches on encrypted:true and re-runs full validation. ---
   const validated = await app.validateBackup(envelope, passphrase);
   check('validateBackup() on an encrypted envelope returns the decrypted, fully-validated payload',
-    JSON.stringify(validated) === JSON.stringify(plaintextBackup));
+    sameApartFromStamp(validated, plaintextBackup));
 
   let noPassphraseMsg = null;
   try { await app.validateBackup(envelope); } catch (e) { noPassphraseMsg = e.message; }
@@ -538,6 +569,18 @@ check('the app re-renders from restored data', rendered);
       !!err && /reconnected/.test(err.message), err && err.message);
     check('a rejected refresh forgets the stored refresh token',
       (await app.getSetting('dropboxRefreshToken', null)) === null);
+
+    // A Dropbox outage or rate limit says nothing about the token — it used
+    // to be forgotten on ANY failed refresh, forcing a reconnect over a blip.
+    await app.setSetting('dropboxRefreshToken', 'rt-still-good');
+    app.fetch = async () => ({ ok: false, status: 503, json: async () => ({ error: 'temporarily_unavailable' }) });
+    let blipErr = null;
+    try { await app.getDropboxAccessToken(); } catch (e) { blipErr = e; }
+    check('a temporary refresh failure (503) asks to try again rather than reconnect',
+      !!blipErr && /try again/.test(blipErr.message), blipErr && blipErr.message);
+    check('...and keeps the stored refresh token',
+      (await app.getSetting('dropboxRefreshToken', null)) === 'rt-still-good');
+    await app.setSetting('dropboxRefreshToken', null);
   }
 
   // --- uploadToDropbox(): the CORS-safe query-param shape. ---
@@ -623,6 +666,10 @@ check('the app re-renders from restored data', rendered);
   // --- Disconnect: forgets the token and best-effort revokes it. ---
   {
     await app.setSetting('dropboxRefreshToken', 'rt-good');
+    const status = app.document.getElementById('dropbox-status');
+    status.textContent = '';
+    await app.renderDropboxStatus();
+    check('a connected Dropbox shows the "Connected" line', /^Connected/.test(status.textContent), status.textContent);
     let revokeCalled = false;
     app.fetch = async (url) => {
       if (String(url).includes('/auth/token/revoke')) { revokeCalled = true; return { ok: true }; }
@@ -636,6 +683,13 @@ check('the app re-renders from restored data', rendered);
     check('disconnecting best-effort revokes the token server-side', revokeCalled);
     check('the button label reverts to "Connect Dropbox…" once disconnected',
       app.document.getElementById('backup-dropbox-btn').textContent === 'Connect Dropbox…');
+    check('...and the "Connected" line goes with it (it used to stay up after disconnecting)',
+      !/^Connected/.test(status.textContent), status.textContent);
+    // The shipped file still carries the placeholder App key, so the button
+    // must be hidden — it used to send you to a Dropbox error page.
+    check('with no real Dropbox App key configured, the Dropbox button is hidden',
+      app.document.getElementById('backup-dropbox-btn').style.display === 'none'
+      && app.document.getElementById('dropbox-disconnect-btn').style.display === 'none');
   }
 
   app.fetch = async () => { throw new Error(REAL_FETCH_ERROR); };
@@ -1099,6 +1153,58 @@ check('no prompt when there is no plan yet', promptBox.hidden === true);
 }
 
 // ---------------------------------------------------------------------------
+// Plan generation: an exercise the model invents gets a muscle guessed from
+// its name (not 'unclassified'), a nameless entry is skipped rather than saved
+// as a nameless exercise, and the starting-weight prompt and its sanity
+// ceiling speak per hand for perSide lifts.
+// ---------------------------------------------------------------------------
+{
+  await app.syncDefaultExercises();
+  await app.clearWorkoutHistory();
+  const all3 = await app.getAllRecords('exercises');
+  const byName3 = (n) => all3.find(e => e.name === n);
+  for (const n of ['Dumbbell Fly', 'Hammer Curl']) await app.putRecord('exercises', { ...byName3(n), perSide: true });
+  // The only anchor: a COMBINED 100kg barbell bench, so the per-hand estimates
+  // below are judged against a total. A 70kg-per-hand curl is 140kg real.
+  await app.logSet(byName3('Barbell Bench Press').id, 'standard', [{ weight: 100, reps: 5 }], null);
+
+  let calls = 0; const prompts = [];
+  app.fetch = async (url, opts) => {
+    calls++; prompts.push(JSON.parse(opts.body).messages[1].content);
+    const payload = calls === 1
+      ? { days: [{ name: 'Push', exercises: [
+          { name: 'Dumbbell Fly', targetSets: 3, repRangeMin: 10, repRangeMax: 15 },
+          { name: 'Hammer Curl', targetSets: 3, repRangeMin: 10, repRangeMax: 15 },
+          { name: 'Cable Pullover Deluxe', targetSets: 3, repRangeMin: 10, repRangeMax: 15 },
+          { targetSets: 3, repRangeMin: 8, repRangeMax: 12 },
+        ] }] }
+      : { estimates: [{ name: 'Dumbbell Fly', weightKg: 14 }, { name: 'Hammer Curl', weightKg: 70 }] };
+    return { ok: true, status: 200, statusText: 'OK', body: null,
+      json: async () => ({ choices: [{ message: { content: JSON.stringify(payload) } }] }) };
+  };
+  await app.setSetting('openrouterKey', 'sk-or-test');
+  await app.setSetting('openrouterModel', 'test/model');
+  const generated = await app.generatePlanWithAI({ goal: 'Hypertrophy', daysPerWeek: 3, equipment: '', notes: '',
+    repRangeMin: 8, repRangeMax: 12, splitType: 'auto', fixedSets: null });
+
+  const after3 = await app.getAllRecords('exercises');
+  const invented = after3.find(e => e.name === 'Cable Pullover Deluxe');
+  check('an exercise the model invents gets a muscle guessed from its name, not "unclassified"',
+    !!invented && invented.primaryMuscle === 'lats', invented && invented.primaryMuscle);
+  check('a nameless entry from the model is skipped, not saved as a nameless exercise',
+    !after3.some(e => !e.name) && generated.days[0].exercises.length === 3,
+    JSON.stringify(generated.days[0].exercises.map(e => e.name)));
+  check('the plan just generated is the active plan by id (not by the newest-plan fallback)',
+    (await app.getSetting('activePlanId', null)) === generated.id && generated.id != null, String(generated.id));
+  check('the estimate prompt marks a perSide exercise to be answered per hand',
+    /Dumbbell Fly[^\n]*\[per hand\]/.test(prompts[1]) && /ONE dumbbell/.test(prompts[1]), prompts[1]);
+  const stored3 = (n) => (after3.find(e => e.name === n) || {}).startingWeightKg;
+  check('a plausible per-hand estimate is stored as given', stored3('Dumbbell Fly') === 14, String(stored3('Dumbbell Fly')));
+  check('a per-hand estimate is held to the ceiling in REAL load (70/hand = 140kg > 1.25 × 100kg)',
+    stored3('Hammer Curl') === undefined, String(stored3('Hammer Curl')));
+}
+
+// ---------------------------------------------------------------------------
 // "Previous plan" (fed to the AI so the next generation varies from it) must
 // mean previously TRAINED, not merely previously generated — a plan that was
 // disliked and regenerated before a single set was ever logged against it
@@ -1509,6 +1615,42 @@ check('clearSetting removes it from the cache',
     !!rowEntryAfterLateUndo && rowEntryAfterLateUndo.sets.some(s => s.ts === removedSolo2.ts),
     JSON.stringify(afterLateUndo.exercises));
 
+  // --- Undo must bring the PLAN link back too. --- A recreated record with
+  // planId null stopped counting as trained against the plan: the Log tab's
+  // rotation repeated the day, and the next generation could prune the plan.
+  await app.clearWorkoutHistory();
+  const planMeta = { planId: 4242, dayIndex: 2, dayName: 'Legs Day' };
+  const planLogged = await app.logSet(row.id, 'standard', [{ weight: 45, reps: 10 }], planMeta);
+  const removedPlanSet = await app.deleteSet(planLogged.id, row.id, 0);
+  await app.restoreSet(today, row.id, removedPlanSet);
+  const restoredPlanDay = (await app.getAllWorkouts()).find(w => w.date === today);
+  check('Undo of a day\'s only set restores the day\'s plan link (planId/dayIndex/dayName)',
+    !!restoredPlanDay && restoredPlanDay.planId === 4242 && restoredPlanDay.dayIndex === 2 && restoredPlanDay.dayName === 'Legs Day',
+    JSON.stringify(restoredPlanDay && { planId: restoredPlanDay.planId, dayIndex: restoredPlanDay.dayIndex, dayName: restoredPlanDay.dayName }));
+  check('...and the stash keys never end up stored on the set itself',
+    !Object.keys(restoredPlanDay.exercises[0].sets[0]).some(k => k.startsWith('__')),
+    JSON.stringify(restoredPlanDay.exercises[0].sets[0]));
+
+  // --- Deleting by timestamp: a double-tapped × must remove ONE set. ---
+  // Both taps carry the same (index, ts). By index alone the second call,
+  // serialised behind the first, removed whatever had slid into that slot.
+  await app.clearWorkoutHistory();
+  let dbl;
+  for (const w of [100, 105, 110]) dbl = await app.logSet(row.id, 'standard', [{ weight: w, reps: 5 }], null);
+  const firstTs = dbl.exercises.find(e => e.exerciseId === row.id).sets[0].ts;
+  await Promise.all([app.deleteSet(dbl.id, row.id, 0, firstTs), app.deleteSet(dbl.id, row.id, 0, firstTs)]);
+  const afterDouble = (await app.getAllWorkouts()).find(w => w.date === today)
+    .exercises.find(e => e.exerciseId === row.id).sets.map(s => s.entries[0].weight);
+  check('two deletes of the same set (by ts) remove exactly one set',
+    JSON.stringify(afterDouble) === JSON.stringify([105, 110]), JSON.stringify(afterDouble));
+  const secondTs = (await app.getAllWorkouts()).find(w => w.date === today)
+    .exercises.find(e => e.exerciseId === row.id).sets[1].ts;
+  await app.updateStandardSet(dbl.id, row.id, 0, 107.5, 6, secondTs);
+  const afterEditByTs = (await app.getAllWorkouts()).find(w => w.date === today)
+    .exercises.find(e => e.exerciseId === row.id).sets.map(s => `${s.entries[0].weight}x${s.entries[0].reps}`);
+  check('updateStandardSet edits the set named by its ts, not whatever sits at the stale index',
+    JSON.stringify(afterEditByTs) === JSON.stringify(['105x5', '107.5x6']), JSON.stringify(afterEditByTs));
+
   // --- A hand-edited exercise must survive the catalog sync. ---
   // The Settings list offers muscle and equipment dropdowns for EVERY row,
   // built-ins included, and syncDefaultExercises() runs on every page load.
@@ -1672,6 +1814,30 @@ check('clearSetting removes it from the cache',
     check('clearing the search restores the unfiltered view', note.hidden === true, String(note.hidden));
     check('rendering survived the whole search cycle', listEl.innerHTML !== undefined);
   }
+}
+
+// ---------------------------------------------------------------------------
+// History renders lazily. Every logged set ends in refreshLogAndHistory(), and
+// History used to rebuild its session list and five charts on each one while
+// nobody could see it. Hidden, it's only marked stale; showTab('history')
+// renders it on the way in.
+// ---------------------------------------------------------------------------
+{
+  const panel = app.document.getElementById('panel-history');
+  const listEl = app.document.getElementById('history-list');
+  const summaryEl = app.document.getElementById('history-summary');
+  panel.classList.contains = () => false;                 // History tab hidden
+  listEl.innerHTML = 'UNTOUCHED';
+  summaryEl.innerHTML = 'UNTOUCHED';
+  await app.refreshLogAndHistory();
+  check('History is not rebuilt while its tab is hidden',
+    listEl.innerHTML === 'UNTOUCHED' && summaryEl.innerHTML === 'UNTOUCHED');
+  check('...but the Workout tab still is (today\'s volume line)',
+    /\d/.test(app.document.getElementById('volume-value').textContent));
+  panel.classList.contains = (c) => c === 'active';       // switching to it
+  await app.showTab('history');
+  check('switching to History renders what was skipped',
+    listEl.innerHTML !== 'UNTOUCHED' && summaryEl.innerHTML !== 'UNTOUCHED');
 }
 
 // ---------------------------------------------------------------------------
@@ -2579,6 +2745,19 @@ check('clearSetting removes it from the cache',
 
   await app.setSetting('equipmentStepsKg', knownDefaults);
   await app.loadSettingsIntoForm(); // leave state clean for anything after this
+}
+
+// After Complete, the session button RESUMES (the original startedAt is kept,
+// see startWorkoutSessionLocked()), so it mustn't promise a new session.
+// Last in the file because it clears workout history.
+{
+  await app.clearWorkoutHistory();
+  await app.startWorkoutSession();
+  await app.completeWorkoutSession();
+  await app.refreshSessionCard();
+  check('after Complete, the start button says "Resume Session", not "Start New Session"',
+    app.document.getElementById('session-start-btn').textContent === 'Resume Session',
+    app.document.getElementById('session-start-btn').textContent);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -210,13 +210,15 @@ await fireAction('remove-dropmyo-entry', () => registries.DROPMYO_ROW_ACTIONS['r
   check('HISTORY edit-set actually rewrote the set',
     editedEntry.sets[0].entries[0].reps === 9, JSON.stringify(editedEntry.sets[0]));
 
-  await fireAction('HISTORY delete-set', () => registries.HISTORY_CLICK_ACTIONS['delete-set'](
-    actionStub({ wid: String(pastWorkout.id), exid: String(pastEntry.exerciseId), idx: '0' })
-  ));
-  const afterDelete = (await app.getAllWorkouts()).find(w => w.id === pastWorkout.id);
-  const deletedEntry = afterDelete ? afterDelete.exercises.find(e => e.exerciseId === pastEntry.exerciseId) : null;
-  check('HISTORY delete-set actually removed a set',
-    (deletedEntry ? deletedEntry.sets.length : 0) === beforeCount - 1);
+  // History is delete-locked: no row renders a delete button, so there is
+  // no delete action to reach. (It used to exist as unreachable wiring that
+  // would have restored an Undo into TODAY's record, not the past day's.)
+  check('History has no delete action (past days are delete-locked)',
+    !('delete-set' in registries.HISTORY_CLICK_ACTIONS));
+  const historyRow = app.renderExerciseGroup({ name: 'X' }, pastEntry, pastWorkout.id);
+  check('...and its rows render no delete button',
+    historyRow.children.every(r => !String(r.innerHTML).includes('data-action="delete-set"')));
+  check('a History edit leaves the set count alone', editedEntry.sets.length === beforeCount);
 }
 await fireAction('HISTORY load-more', () => registries.HISTORY_CLICK_ACTIONS['load-more'](actionStub()));
 {
@@ -362,6 +364,57 @@ await app.refreshLogAndHistory();
 
   check('logging a later exercise reveals IT, not an earlier untouched one',
     revealedB === true && revealedA === false, `revealedA=${revealedA} revealedB=${revealedB}`);
+}
+{
+  // Mid-session the card's suggestion must stay the plan for TODAY (judged on
+  // earlier sessions), and the next set must start from the one just logged.
+  // Fed today's half-finished sets, the suggestion used to re-judge after
+  // every log and ask for MORE reps on set 2 than set 1 at the same weight.
+  const legsDay = plan.days[2];
+  const calf = legsDay.exercises[2];                       // Calf Raise — history, nothing today yet
+  const cardHtml = () => {
+    const html = app.document.getElementById('active-workout-list').innerHTML;
+    const start = html.indexOf(`id="ex-card-${calf.exerciseId}"`);
+    const next = html.indexOf('id="ex-card-', start + 1);
+    return html.slice(start, next === -1 ? undefined : next);
+  };
+  const suggText = (h) => (h.match(/class="sugg-text">([^<]*)</) || [])[1];
+  await app.refreshLogAndHistory();
+  const before = suggText(cardHtml());
+  await app.logSet(calf.exerciseId, 'standard', [{ weight: 30, reps: 10 }], { planId: plan.id, dayIndex: 2, dayName: legsDay.name });
+  await app.refreshLogAndHistory();
+  const after = cardHtml();
+  check('the suggestion line does not change after the first set of the session',
+    !!before && suggText(after) === before, `"${before}" -> "${suggText(after)}"`);
+  const wPrefill = (after.match(/class="plan-log-weight"[^>]*value="([^"]*)"/) || [])[1];
+  const rPrefill = (after.match(/class="plan-log-reps" value="([^"]*)"/) || [])[1];
+  check('the next set is prefilled with the set just logged (weight and reps)',
+    Number(wPrefill) === app.displayWeight(30) && rPrefill === '10', `${wPrefill} x ${rPrefill}`);
+
+  // Swap for today must exclude everything already on today's list — not just
+  // the exercise being swapped — or two cards end up sharing an exercise id.
+  const squatId = legsDay.exercises[0].exerciseId;
+  const swapGroup = actionStub({ exid: String(calf.exerciseId), origExid: String(calf.exerciseId) });
+  await fireAction('swap-open (exclusions)', () => registries.WORKOUT_CLICK_ACTIONS['swap-open'](swapGroup));
+  const pickerHtml = app.document.getElementById('exercise-picker-body').innerHTML;
+  check('the session-swap picker excludes another exercise already on today\'s list',
+    !pickerHtml.includes(`data-exid="${squatId}"`));
+  check('...but still offers exercises not on the day',
+    /data-action="pick-exercise"/.test(pickerHtml));
+
+  // Typing an excluded exercise's name into "add a new exercise" mustn't
+  // sneak it in anyway.
+  app.document.getElementById('picker-new-ex-name').value = 'back squat';
+  await listeners.get('picker-new-ex-save').click();
+  const todayAfterQuickAdd = await app.getWorkoutForDate(today);
+  check('quick-adding the name of an exercise already on the day is refused (no swap recorded)',
+    !(todayAfterQuickAdd.exerciseSwaps && todayAfterQuickAdd.exerciseSwaps[calf.exerciseId] === squatId),
+    JSON.stringify(todayAfterQuickAdd.exerciseSwaps));
+
+  await app.renderExercisePickerBody('pull up');
+  check('picker search matches "pull up" to "Pull-Up" (nameKey, like every other name search)',
+    app.document.getElementById('exercise-picker-body').innerHTML.includes('>Pull-Up<'));
+  app.closeExercisePicker();
 }
 await fireAction('toggle-exercise', () => registries.WORKOUT_CLICK_ACTIONS['toggle-exercise'](actionStub({ exid: String(dayExId) })));
 {

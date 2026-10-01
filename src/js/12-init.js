@@ -131,7 +131,17 @@
     handleDropboxRedirect().then(renderDropboxStatus).catch(() => {});
   }
 
-  document.getElementById('today-label').textContent = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+  renderTodayLabel();
+
+  // An installed app is often RESUMED rather than relaunched — opened from the
+  // home screen days after it was last used, with the page still in memory.
+  // Nothing re-rendered on that: the header kept the old date and the Log tab
+  // kept yesterday's day of the split. Catch up when the app comes back on a
+  // different calendar day than it last drew.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden || lastRefreshDate === null || lastRefreshDate === todayStr()) return;
+    refreshLogAndHistory().then(refreshPlanTab).catch(err => reportUnexpected('New-day refresh', err));
+  });
 
   // The storage fallback is attached to openDB() ONLY.
   //

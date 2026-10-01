@@ -15,14 +15,6 @@
     if (form) form.addEventListener('submit', (e) => e.preventDefault());
   });
 
-  document.getElementById('setting-apikey').addEventListener('change', async (e) => {
-    await setSetting('openrouterKey', e.target.value.trim());
-    await refreshApiKeyStatus();
-  });
-  document.getElementById('setting-model').addEventListener('change', async (e) => {
-    await setSetting('openrouterModel', e.target.value.trim());
-  });
-
   // Progression suggestions (Log and Plan tabs) and the pace/setup/session
   // hints all quote numbers derived from these settings, so any of them
   // changing has to repaint every place that shows one.

@@ -116,6 +116,78 @@ ok('perSideNoteHtml() renders a note only when the flag is set',
    && app.perSideNoteHtml({ perSide: false }) === ''
    && app.perSideNoteHtml(null) === '');
 
+// The SAME real load, logged per side or as a total, must progress at the
+// same real rate. The step is per implement, so one step on a perSide lift
+// moves the real load by two steps; comparing the target against one step
+// used to progress per-side lifts at up to twice the intended rate.
+{
+  const perSide = { equipment: 'dumbbell', perSide: true };
+  const combined = { equipment: 'dumbbell' };
+  const realRate = (plan, ex) => (ex.perSide ? plan.incrementKg * 2 : plan.incrementKg) / plan.sessionsRequired;
+  const cases = [['novice', 30], ['intermediate', 30], ['advanced', 30], ['novice', 60]];
+  const mismatches = cases.filter(([exp, perHand]) => {
+    const a = app.progressionPlan(perHand, 'upper', exp, perSide, {});
+    const b = app.progressionPlan(perHand * 2, 'upper', exp, combined, {});
+    // Rounding to whole steps means the two can't always be identical, but
+    // the per-side real rate must never exceed the combined one's by more
+    // than one step's worth of rounding, and never double it.
+    return realRate(a, perSide) > realRate(b, combined) * 1.5;
+  });
+  ok('a perSide lift progresses at the same real-load rate as the same load logged combined',
+     mismatches.length === 0, JSON.stringify(mismatches));
+  // 50kg per hand is 100kg real; novice upper is 3.3% = 3.3kg real per
+  // session. One step on each dumbbell is already more than that, so it must
+  // be spread over sessions rather than taken every session (which ran at
+  // ~4.5kg real per session).
+  const heavy = app.progressionPlan(50, 'upper', 'novice', perSide, {});
+  ok('a perSide jump is sized in real load, not per hand',
+     (heavy.incrementKg * 2) / heavy.sessionsRequired <= 100 * 0.033 + 1e-9, JSON.stringify(heavy));
+}
+
+// The starting-weight estimator compares in REAL load: a combined-logged
+// dumbbell lift seeding a perSide one must come out per hand (about half),
+// and the other way round about double — not the raw number copied across.
+{
+  const mk = (id, name, perSide) => ({ id, name, primaryMuscle: 'chest', secondaryMuscles: [], equipment: 'dumbbell', perSide });
+  const combinedAnchor = mk(9001, 'Probe Combined Press', false);
+  const perHandAnchor = mk(9002, 'Probe Per-Hand Press', true);
+  const perHandTarget = mk(9003, 'Probe Per-Hand Fly', true);
+  const combinedTarget = mk(9004, 'Probe Combined Fly', false);
+  const byId = Object.fromEntries([combinedAnchor, perHandAnchor, perHandTarget, combinedTarget].map(e => [e.id, e]));
+  const hist = (ex, kg) => [{ date: '2026-01-05', exercises: [{ exerciseId: ex.id, sets: [{ ts: 1, type: 'standard', entries: [{ weight: kg, reps: 10 }] }] }] }];
+  const fromCombined = app.estimateStartingWeight(perHandTarget, hist(combinedAnchor, 40), byId);
+  ok('a per-hand target seeded from a 40kg combined lift comes out per hand (~17kg, not ~34kg)',
+     fromCombined && fromCombined.weightKg > 12 && fromCombined.weightKg < 22, JSON.stringify(fromCombined));
+  const fromPerHand = app.estimateStartingWeight(combinedTarget, hist(perHandAnchor, 20), byId);
+  ok('a combined target seeded from a 20kg-per-hand lift comes out as a total (~34kg, not ~17kg)',
+     fromPerHand && fromPerHand.weightKg > 28 && fromPerHand.weightKg < 40, JSON.stringify(fromPerHand));
+}
+
+// "Weeks trained" for the sets-per-week chart: N sessions d days apart are
+// N×d days of training, not the (N−1)×d between the first and the last.
+{
+  const mwf = [];
+  for (let wk = 0; wk < 4; wk++) for (const dow of [0, 2, 4]) {
+    const d = new Date(2026, 0, 5 + wk * 7 + dow);   // Mon 5 Jan 2026 onward
+    mwf.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
+  }
+  const w = app.trainingWeeks(mwf);
+  ok('four weeks of Mon/Wed/Fri counts as about four weeks, not 3.6', Math.abs(w - 4) < 0.15, `${w.toFixed(2)} weeks`);
+  ok('a single session counts as one week', app.trainingWeeks(['2026-01-05']) === 1);
+  ok('one session a fortnight over two sessions is four weeks', Math.abs(app.trainingWeeks(['2026-01-05', '2026-01-19']) - 4) < 1e-9);
+}
+
+// The Log tab's day pick expires with the day — unless a workout is still
+// going across midnight.
+{
+  const H = 3600000, now = Date.parse('2026-03-02T09:00:00');
+  ok('a pick from yesterday, idle overnight, is stale', app.dayPickIsStale('2026-03-01', '2026-03-02', now - 10 * H, now) === true);
+  ok('a pick from yesterday with a set logged 20 minutes ago is kept (training past midnight)',
+     app.dayPickIsStale('2026-03-01', '2026-03-02', now - H / 3, now) === false);
+  ok('a pick from today is never stale', app.dayPickIsStale('2026-03-02', '2026-03-02', 0, now) === false);
+  ok('no pick yet is not "stale"', app.dayPickIsStale(null, '2026-03-02', 0, now) === false);
+}
+
 // Rest-timer suppression on the set that completes an exercise.
 ok('no rest after the completing set', app.shouldRestAfter(3, 3) === false);
 ok('rest between sets of the same exercise', app.shouldRestAfter(1, 3) && app.shouldRestAfter(2, 3));

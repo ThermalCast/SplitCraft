@@ -1115,7 +1115,7 @@
   </div>
 
   <div class="storage-warning" id="storage-warning">
-    Local storage isn't available in this preview environment — data won't persist here. Deploy this file to your own hosting to test real persistence.
+    This browser isn't letting SplitCraft save data right now (private browsing, or site storage blocked), so anything logged will be lost when this page closes. Export a backup from Settings before you close it.
   </div>
 
   <!-- ===== LOG TAB ===== -->
@@ -1576,7 +1576,7 @@
                two above — see the comment above the Dropbox subsystem in
                06-catalog-import-backup.js for why an OAuth credential is
                acceptable here when it wasn't for Drive or a GitHub token. -->
-          <button type="button" class="primary-btn" id="backup-dropbox-btn">Connect Dropbox…</button>
+          <button type="button" class="primary-btn" id="backup-dropbox-btn" style="display:none;">Connect Dropbox…</button>
         </div>
         <div class="hint" id="backup-export-status"></div>
         <div class="hint" id="dropbox-status"></div>
@@ -2165,22 +2165,21 @@
     });
   }
 
-  function idbAdd(store, record) {
+  // Writes settle on the TRANSACTION, not the request. A request's `success`
+  // only means the operation was queued without error; the transaction can
+  // still abort afterwards (QuotaExceededError on a full device surfaces
+  // exactly there), and resolving early reported a set as saved when it
+  // never reached disk.
+  function idbWrite(store, op) {
     return new Promise((resolve, reject) => {
       const tx = db.transaction(store, 'readwrite');
-      const req = tx.objectStore(store).add(record);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = (e) => reject(e.target.error);
+      const req = op(tx.objectStore(store));
+      tx.oncomplete = () => resolve(req.result);
+      tx.onabort = () => reject(tx.error || req.error || new Error(`Saving to "${store}" was rolled back`));
     });
   }
-  function idbPut(store, record) {
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(store, 'readwrite');
-      const req = tx.objectStore(store).put(record);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = (e) => reject(e.target.error);
-    });
-  }
+  function idbAdd(store, record) { return idbWrite(store, s => s.add(record)); }
+  function idbPut(store, record) { return idbWrite(store, s => s.put(record)); }
   function idbGet(store, key) {
     return new Promise((resolve, reject) => {
       const tx = db.transaction(store, 'readonly');
@@ -2197,12 +2196,32 @@
       req.onerror = (e) => reject(e.target.error);
     });
   }
-  function idbDelete(store, key) {
+  function idbDelete(store, key) { return idbWrite(store, s => s.delete(key)).then(() => {}); }
+
+  // Replaces the whole contents of several stores in ONE transaction, so it
+  // either all lands or none of it does. Restore needs exactly that: it
+  // clears your data before writing the backup's, and as separate
+  // transactions a failure (or the app being closed) partway through left the
+  // device with your old data gone and only part of the backup in its place.
+  // A synchronous throw from put() (an invalid key, an uncloneable value)
+  // would otherwise leave the already-queued clears to auto-commit, so it
+  // aborts explicitly.
+  function idbReplaceAll(contents) {
+    const stores = Object.keys(contents);
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(store, 'readwrite');
-      const req = tx.objectStore(store).delete(key);
-      req.onsuccess = () => resolve();
-      req.onerror = (e) => reject(e.target.error);
+      const tx = db.transaction(stores, 'readwrite');
+      tx.oncomplete = () => resolve();
+      tx.onabort = () => reject(tx.error || new Error('Restore was rolled back — nothing was changed'));
+      try {
+        for (const store of stores) {
+          const os = tx.objectStore(store);
+          os.clear();
+          for (const rec of contents[store]) os.put(rec);
+        }
+      } catch (e) {
+        try { tx.abort(); } catch (abortErr) { /* already finished */ }
+        reject(e);
+      }
     });
   }
 
@@ -2246,9 +2265,22 @@
     return workoutsCachePromise;
   }
 
+  // IndexedDB generates an auto-increment key on its own structured CLONE of
+  // the record, never on the caller's object — so after add()/put() of a new
+  // record, `record.id` was still undefined in a real browser, while the
+  // in-memory fallback (and therefore every test) did set it. Code that read
+  // `.id` straight off the object it had just saved got `undefined`: the
+  // active-plan setting after generating a plan, and the RIR answer for a
+  // day's first set, which then failed to save. Stamping it here makes both
+  // backends agree.
+  const AUTO_ID_STORES = new Set(['workouts', 'exercises', 'plans']);
+  function stampId(store, record, id) {
+    if (AUTO_ID_STORES.has(store) && record && record.id == null) record.id = id;
+    return id;
+  }
   async function addRecord(store, record) {
     if (store === 'workouts') invalidateWorkoutsCache();
-    if (dbAvailable) return idbAdd(store, record);
+    if (dbAvailable) return stampId(store, record, await idbAdd(store, record));
     const id = memory.nextId[store]++;
     record.id = id;
     memory[store].push(record);
@@ -2256,7 +2288,7 @@
   }
   async function putRecord(store, record) {
     if (store === 'workouts') invalidateWorkoutsCache();
-    if (dbAvailable) return idbPut(store, record);
+    if (dbAvailable) return stampId(store, record, await idbPut(store, record));
     const idx = memory[store].findIndex(r => r.id === record.id);
     if (idx >= 0) { memory[store][idx] = record; return record.id; }
     const id = memory.nextId[store]++;
@@ -2309,12 +2341,7 @@
       if (memory.nextId[store]) memory.nextId[store] = 1;
       return;
     }
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(store, 'readwrite');
-      const req = tx.objectStore(store).clear();
-      req.onsuccess = () => resolve();
-      req.onerror = (e) => reject(e.target.error);
-    });
+    return idbWrite(store, s => s.clear()).then(() => {});
   }
   // Settings (and only settings) are mirrored into localStorage alongside
   // IndexedDB. Two independent reasons:
@@ -2426,6 +2453,25 @@
     lsRemoveSetting(key);
     delete memory.settings[key];
     if (dbAvailable) return idbDelete('settings', key);
+  }
+
+  // Brings the cache and the localStorage mirror into line with a settings
+  // store that has just been REPLACED wholesale (restore). Every mirrored key
+  // not in `settings` has to go too: loadSettings() lets the mirror fill any
+  // gap in the primary store, so a leftover would quietly come back on the
+  // next launch.
+  function replaceSettingsLocally(settings) {
+    settingsCache.clear();
+    for (const [key, value] of Object.entries(settings)) settingsCache.set(key, value);
+    try {
+      const mirrored = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(LS_PREFIX)) mirrored.push(k);
+      }
+      mirrored.forEach(k => localStorage.removeItem(k));
+    } catch (e) { /* localStorage unavailable — nothing mirrored to clean */ }
+    for (const [key, value] of Object.entries(settings)) lsSetSetting(key, value);
   }
 
   // exercisePrefs is keyed by exerciseId (not autoIncrement), so it needs its
@@ -2565,17 +2611,29 @@
     return { ...workout, sessionJustStarted };
   }
 
+  // Index of the set to act on: by its own timestamp when the caller has one
+  // (unique within the day — see logSetLocked()), by position otherwise.
+  // Position alone is not an identity: the lock serialises a double-tapped
+  // delete, and the second call then removed whatever had slid into that
+  // position — the NEXT set. -1 means the set is already gone.
+  function setIndexFor(exEntry, setIndex, expectTs) {
+    if (expectTs == null) return exEntry.sets[setIndex] ? setIndex : -1;
+    return exEntry.sets.findIndex(s => s.ts === expectTs);
+  }
+
   // Returns the removed set (so a caller can offer an Undo), or `null` if
   // there was nothing to remove.
-  async function deleteSet(workoutId, exerciseId, setIndex) {
-    return withWorkoutLock(() => deleteSetLocked(workoutId, exerciseId, setIndex));
+  async function deleteSet(workoutId, exerciseId, setIndex, expectTs) {
+    return withWorkoutLock(() => deleteSetLocked(workoutId, exerciseId, setIndex, expectTs));
   }
-  async function deleteSetLocked(workoutId, exerciseId, setIndex) {
+  async function deleteSetLocked(workoutId, exerciseId, setIndex, expectTs) {
     const workout = await getRecord('workouts', workoutId);
     if (!workout) return null;
     const exEntry = workout.exercises.find(ex => ex.exerciseId === exerciseId);
     if (!exEntry) return null;
-    let [removed] = exEntry.sets.splice(setIndex, 1);
+    const idx = setIndexFor(exEntry, setIndex, expectTs);
+    if (idx === -1) return null;
+    let [removed] = exEntry.sets.splice(idx, 1);
     if (exEntry.sets.length === 0) workout.exercises = workout.exercises.filter(ex => ex.exerciseId !== exerciseId);
     // Keep the record if a session was EXPLICITLY started (Start Warm-up), a
     // today-only set-count override is set, or a session-only exercise swap
@@ -2596,9 +2654,20 @@
       // can't collide with a real set field (ts/type/entries/rir) and reads
       // as obviously-not-set-data to anything else that looks at `removed`;
       // restoreSetLocked strips it back off before the set is stored.
-      if (removed && workout.startedAt != null) {
-        removed = { ...removed, __deletedStartedAt: workout.startedAt, __deletedStartedAuto: !!workout.startedAuto };
+      //
+      // The plan link travels the same way. Without it the recreated record
+      // had planId null, so the day stopped counting as trained against the
+      // plan: the Log tab's rotation offered the same day again next time,
+      // and the next generation could prune a plan that had been used.
+      const stash = {};
+      if (workout.startedAt != null) {
+        stash.__deletedStartedAt = workout.startedAt;
+        stash.__deletedStartedAuto = !!workout.startedAuto;
       }
+      if (workout.planId != null) {
+        stash.__deletedPlanMeta = { planId: workout.planId, dayIndex: workout.dayIndex, dayName: workout.dayName };
+      }
+      if (removed && Object.keys(stash).length) removed = { ...removed, ...stash };
     } else {
       await putRecord('workouts', workout);
     }
@@ -2628,19 +2697,21 @@
     // Pull the session-start stamp (if deleteSetLocked attached one — see
     // its comment) off the set BEFORE it's touched again, and strip it so it
     // never ends up stored as if it were part of the set itself.
-    const { __deletedStartedAt: deletedStartedAt, __deletedStartedAuto: deletedStartedAuto, ...cleanSet } = set;
+    const { __deletedStartedAt: deletedStartedAt, __deletedStartedAuto: deletedStartedAuto,
+      __deletedPlanMeta: deletedPlanMeta, ...cleanSet } = set;
     let workout = await getWorkoutForDate(date);
     if (!workout) {
       // Recreating the record from scratch: restore the session-start fields
-      // it carried when deleted, or logging/rendering code sees a day with a
-      // set on it but a session that's "Not started". Only done here, on a
-      // fresh record — an EXISTING record's own startedAt/startedAuto must
-      // never be overwritten by an unrelated undo.
+      // and plan link it carried when deleted, or logging/rendering code sees
+      // a day with a set on it but a session that's "Not started", logged
+      // against no plan. Only done here, on a fresh record — an EXISTING
+      // record's own fields must never be overwritten by an unrelated undo.
       workout = { date, ts: Date.now(), planId: null, dayIndex: null, dayName: null, exercises: [] };
       if (deletedStartedAt != null) {
         workout.startedAt = deletedStartedAt;
         if (deletedStartedAuto) workout.startedAuto = true;
       }
+      if (deletedPlanMeta) Object.assign(workout, deletedPlanMeta);
     }
     let exEntry = workout.exercises.find(ex => ex.exerciseId === exerciseId);
     if (!exEntry) { exEntry = { exerciseId, sets: [] }; workout.exercises.push(exEntry); }
@@ -2686,15 +2757,17 @@
     await putRecord('workouts', workout);
   }
 
-  async function updateStandardSet(workoutId, exerciseId, setIndex, weightKg, reps) {
-    return withWorkoutLock(() => updateStandardSetLocked(workoutId, exerciseId, setIndex, weightKg, reps));
+  async function updateStandardSet(workoutId, exerciseId, setIndex, weightKg, reps, expectTs) {
+    return withWorkoutLock(() => updateStandardSetLocked(workoutId, exerciseId, setIndex, weightKg, reps, expectTs));
   }
-  async function updateStandardSetLocked(workoutId, exerciseId, setIndex, weightKg, reps) {
+  async function updateStandardSetLocked(workoutId, exerciseId, setIndex, weightKg, reps, expectTs) {
     const workout = await getRecord('workouts', workoutId);
     if (!workout) return;
     const exEntry = workout.exercises.find(ex => ex.exerciseId === exerciseId);
-    if (!exEntry || !exEntry.sets[setIndex]) return;
-    const set = exEntry.sets[setIndex];
+    if (!exEntry) return;
+    const idx = setIndexFor(exEntry, setIndex, expectTs);
+    if (idx === -1) return;
+    const set = exEntry.sets[idx];
     if (set.type !== 'standard') return;
     set.entries = [{ weight: weightKg, reps }];
     await putRecord('workouts', workout);
@@ -3049,16 +3122,21 @@
   // =========================================================================
   // Tabs
   // =========================================================================
+  function showTab(tab) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    document.getElementById('panel-' + tab).classList.add('active');
+    // Switching tabs from halfway down a long set list otherwise drops you
+    // into the middle of the new panel.
+    window.scrollTo(0, 0);
+    // History isn't rebuilt while hidden (see historyTabVisible(),
+    // 05-history.js) — catch it up now that it's about to be seen.
+    if (tab === 'history' && historyStale) {
+      return refreshHistoryTab().catch(err => reportUnexpected('History', err));
+    }
+  }
   document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-      btn.classList.add('active');
-      document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
-      // Switching tabs from halfway down a long set list otherwise drops you
-      // into the middle of the new panel.
-      window.scrollTo(0, 0);
-    });
+    btn.addEventListener('click', () => showTab(btn.dataset.tab));
   });
 
   // =========================================================================
@@ -3450,6 +3528,7 @@
     fitnessBtn.style.display = (await getSetting('appleFitnessShortcutName', '')).trim() ? 'block' : 'none';
 
     display.classList.remove('idle', 'running');
+    display.title = '';
     if (!workout || !workout.startedAt) {
       display.textContent = 'Not started';
       display.classList.add('idle');
@@ -3468,7 +3547,11 @@
     } else {
       display.textContent = formatDuration(workout.durationMs);
       display.title = 'Completed';
-      startBtn.textContent = 'Start New Session';
+      // "Resume", not "Start New": pressing it keeps today's original
+      // startedAt (see startWorkoutSessionLocked()), so the clock carries on
+      // from the morning's start rather than counting from zero, which is
+      // what an accidental early Complete wants.
+      startBtn.textContent = 'Resume Session';
       startBtn.style.display = 'block';
       startHint.style.display = 'none';
       completeBtn.style.display = 'none';
@@ -3535,18 +3618,15 @@
     return toKg(displayedValue);
   }
 
-  // allowDelete is false for History rows: past days render without a delete
-  // button at all \u2014 once a day isn't today anymore, DELETION is locked. This
-  // flag governs deletion and nothing else.
+  // History rows have no delete button: past days are delete-locked (see
+  // "History is delete-locked" in the design summary). Today's sets are
+  // deleted from the active workout's own card.
   //
   // Inline weight/reps editing of standard sets deliberately still works in
-  // History (see "History is delete-locked" in the design summary): fixing a
-  // number you fat-fingered last Tuesday is cheap and reversible, whereas
-  // deleting a set you no longer have any record of is not. The comment here
-  // used to claim the whole row was "locked in ... only today's log stays
-  // correctable", which described neither the code nor the intent and made the
-  // live inputs in History look like a leak rather than a feature.
-  function renderExerciseGroup(exercise, exEntry, workoutId, allowDelete = true) {
+  // History: fixing a number you fat-fingered last Tuesday is cheap and
+  // reversible, whereas deleting a set you no longer have any record of is
+  // not.
+  function renderExerciseGroup(exercise, exEntry, workoutId) {
     const wrap = document.createElement('div');
     wrap.className = 'exercise-group';
     const title = document.createElement('div');
@@ -3555,14 +3635,12 @@
     wrap.appendChild(title);
     exEntry.sets.forEach((s, i) => {
       const row = document.createElement('div');
-      const delBtn = allowDelete
-        ? `<button class="del" data-wid="${workoutId}" data-exid="${exEntry.exerciseId}" data-idx="${i}" data-action="delete-set" title="Delete set">\u00d7</button>`
-        : '';
       if (s.type === 'standard') {
         row.className = 'plan-log-row done-set';
         row.dataset.wid = workoutId;
         row.dataset.exid = exEntry.exerciseId;
         row.dataset.idx = i;
+        row.dataset.ts = s.ts;
         // Full-precision stored weight, so a reps-only edit can put it back
         // untouched — see weightToStore().
         row.dataset.kg = s.entries[0].weight;
@@ -3571,7 +3649,6 @@
           ${s.entries[0].weight < 0 ? `<button type="button" class="sign-btn negative" data-action="toggle-sign" title="Toggle negative \u2014 for assisted reps, enter how much weight is taken off you">\u00b1</button>` : ''}
           ${weightFieldHtml(`<input type="number" inputmode="decimal" step="0.5" class="set-edit-weight" data-action="edit-set" aria-label="Weight" value="${displayWeight(s.entries[0].weight)}">`, exercise)}
           <input type="number" inputmode="numeric" step="1" min="1" class="set-edit-reps" data-action="edit-set" aria-label="Reps" value="${s.entries[0].reps}">
-          ${delBtn}
         `;
       } else {
         row.className = 'set-row';
@@ -3579,7 +3656,6 @@
         row.innerHTML = `
           <span class="set-idx">${i + 1}</span>
           <span class="set-data">${badge}${esc(formatSetLine(s))}</span>
-          ${delBtn}
         `;
       }
       wrap.appendChild(row);
@@ -3947,6 +4023,20 @@
   // Divided by the weeks you actually TRAINED in the range (first to last
   // session), not the calendar length of the range — picking "last year" with
   // eight months of data shouldn't dilute every number by a third.
+  //
+  // First-to-last alone comes up one gap short: N sessions spaced d days
+  // apart represent N×d days of training, but the span between the first
+  // and last is only (N−1)×d. Four weeks of Mon/Wed/Fri spans 25 days, which
+  // read as 3.6 weeks and overstated every sets-per-week bar by ~12%. Adding
+  // back one average gap gives the true N×d.
+  function trainingWeeks(dates) {
+    const distinct = [...new Set(dates)].sort();
+    if (distinct.length < 2) return 1;
+    const spanDays = (Date.parse(distinct[distinct.length - 1] + 'T00:00:00') - Date.parse(distinct[0] + 'T00:00:00')) / 86400000;
+    const avgGap = spanDays / (distinct.length - 1);
+    return Math.max(1, (spanDays + avgGap) / 7);
+  }
+
   function renderMuscleChart() {
     const el = document.getElementById('chart-muscles');
     const musclesById = Object.fromEntries(MUSCLES.map(m => [m.id, m]));
@@ -3961,9 +4051,7 @@
       .sort((a, b) => b.count - a.count);
     if (rows.length === 0) { el.innerHTML = '<div class="empty" style="border:none;">No sets in this range.</div>'; return; }
 
-    const dates = historyRanged.map(w => w.date).sort();
-    const spanDays = (Date.parse(dates[dates.length - 1] + 'T00:00:00') - Date.parse(dates[0] + 'T00:00:00')) / 86400000;
-    const weeks = Math.max(1, spanDays / 7);
+    const weeks = trainingWeeks(historyRanged.map(w => w.date));
     const perWeek = r => r.count / weeks;
     const max = Math.max(...rows.map(perWeek));
 
@@ -4167,10 +4255,13 @@
     delegate(el, 'click', PROGRESS_CHART_ACTIONS);
   }
 
+  // The History tab's own controls only change what History shows, so they
+  // rebuild just History rather than putting the whole app through
+  // refreshLogAndHistory().
   document.getElementById('history-range').addEventListener('change', (e) => {
     historyRangeDays = e.target.value === 'all' ? null : Number(e.target.value);
     historyShowAll = false;
-    refreshLogAndHistory();
+    refreshHistoryTab();
   });
   // Only the progress chart depends on this, so re-render just that rather
   // than putting the whole app through refreshLogAndHistory.
@@ -4183,7 +4274,7 @@
     historyMuscleId = e.target.value;
     renderMuscleTrendChart();
   });
-  // Debounced: refreshLogAndHistory() re-renders four charts and the whole
+  // Debounced: a History rebuild re-renders five charts and the whole
   // session list, and doing that per keystroke on a phone is visibly janky.
   let historySearchTimer = null;
   document.getElementById('history-search').addEventListener('input', (e) => {
@@ -4192,35 +4283,16 @@
     historySearchTimer = setTimeout(() => {
       historySearch = value;
       historyShowAll = false;   // a new filter starts at the top of its own list
-      refreshLogAndHistory();
+      refreshHistoryTab();
     }, 200);
   });
 
   // Delegated actions for #history-list, wired once (see delegate() in
   // 03-helpers.js) instead of the three `querySelectorAll(...).forEach(...)`
-  // passes this used to run on every repaint.
-  //
-  // 'delete-set' mirrors the pre-existing wiring for `button.del` inside
-  // this container: renderExerciseGroup() is always called here with
-  // allowDelete=false (see "History is delete-locked" in the design
-  // summary), so no delete button is ever actually rendered in this list —
-  // the action exists for symmetry with the active workout's identical
-  // handler and is harmless dead wiring either way, exactly as the old
-  // per-render forEach was.
+  // passes this used to run on every repaint. No 'delete-set': History never
+  // renders a delete button (see renderExerciseGroup()).
   const HISTORY_CLICK_ACTIONS = {
-    'delete-set': async (el) => {
-      const today = todayStr();
-      const exerciseId = Number(el.dataset.exid);
-      const removed = await deleteSet(Number(el.dataset.wid), exerciseId, Number(el.dataset.idx));
-      refreshLogAndHistory();
-      if (removed) {
-        toast('Set deleted', 'ok', { duration: 6000, action: { label: 'Undo', onClick: async () => {
-          await restoreSet(today, exerciseId, removed);
-          await refreshLogAndHistory();
-        } } });
-      }
-    },
-    'load-more': () => { historyShowAll = true; refreshLogAndHistory(); },
+    'load-more': () => { historyShowAll = true; refreshHistoryTab(); },
     'toggle-sign': TOGGLE_SIGN_ACTIONS['toggle-sign'],
   };
   // Fires on `change` (blur/Enter) for the weight/reps inputs of an
@@ -4244,8 +4316,9 @@
       const workoutId = Number(row.dataset.wid);
       const exerciseId = Number(row.dataset.exid);
       const setIndex = Number(row.dataset.idx);
+      const ts = row.dataset.ts ? Number(row.dataset.ts) : undefined;
       const originalKg = parseFloat(row.dataset.kg);
-      await updateStandardSet(workoutId, exerciseId, setIndex, weightToStore(weight, originalKg), reps);
+      await updateStandardSet(workoutId, exerciseId, setIndex, weightToStore(weight, originalKg), reps, ts);
       refreshLogAndHistory();
     },
   };
@@ -4259,16 +4332,59 @@
     'edit-set': (el) => syncSignClass(el),
   };
 
+  // The header's date line. Re-rendered on every refresh rather than set once
+  // at load: an installed app can sit in the background for days and come
+  // back without reloading, still announcing the day it was opened.
+  function renderTodayLabel() {
+    const el = document.getElementById('today-label');
+    if (el) el.textContent = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+  }
+  // The calendar date of the last refreshLogAndHistory() — compared on
+  // returning to the app (12-init.js) to notice that the day has changed
+  // underneath a screen that hasn't.
+  let lastRefreshDate = null;
+
+  // History is rebuilt only while its tab is showing. Every logged set ends
+  // in refreshLogAndHistory(), and History was rebuilding its whole session
+  // list and all five charts on each one — work nobody could see from the
+  // Workout tab. While hidden it's just marked stale, and showTab()
+  // (03-helpers.js) renders it on the way in.
+  let historyStale = true;
+  function historyTabVisible() {
+    const panel = document.getElementById('panel-history');
+    return !!(panel && panel.classList && panel.classList.contains('active'));
+  }
+  async function refreshHistoryTab(workouts, exercisesById) {
+    const allWorkouts = workouts || await getAllWorkouts();
+    const byId = exercisesById || Object.fromEntries((await getAllRecords('exercises')).map(e => [e.id, e]));
+    renderHistoryTab(allWorkouts, byId);
+    historyStale = false;
+  }
+
   async function refreshLogAndHistory() {
     const workouts = await getAllWorkouts();
     const exercises = await getAllRecords('exercises');
     const exercisesById = Object.fromEntries(exercises.map(e => [e.id, e]));
     const today = todayStr();
+    renderTodayLabel();
+    lastRefreshDate = today;
 
     const todayWorkout = workouts.find(w => w.date === today);
     const volumeKg = todayWorkout ? workoutStats(todayWorkout, exercisesById).volumeKg : 0;
     document.getElementById('volume-value').textContent = `${Math.round(fromKg(volumeKg)).toLocaleString()} ${weightUnit}`;
 
+    if (historyTabVisible()) await refreshHistoryTab(workouts, exercisesById);
+    else historyStale = true;
+
+    // All three reuse the `workouts` array read at the top of this function
+    // rather than each re-reading the whole store.
+    await renderWeekProgress(workouts);
+    await refreshSessionCard();
+    await refreshActiveWorkoutSection(workouts);
+  }
+
+  function renderHistoryTab(workouts, exercisesById) {
+    const today = todayStr();
     const historyList = document.getElementById('history-list');
     historyList.innerHTML = '';
 
@@ -4356,7 +4472,7 @@
 
         const body = document.createElement('div');
         body.className = 'session-body';
-        w.exercises.forEach(ex => body.appendChild(renderExerciseGroup(exercisesById[ex.exerciseId], ex, w.id, false)));
+        w.exercises.forEach(ex => body.appendChild(renderExerciseGroup(exercisesById[ex.exerciseId], ex, w.id)));
         det.appendChild(body);
         historyList.appendChild(det);
       }
@@ -4373,12 +4489,6 @@
     delegate(historyList, 'click', HISTORY_CLICK_ACTIONS);
     delegate(historyList, 'change', HISTORY_CHANGE_ACTIONS);
     delegate(historyList, 'input', HISTORY_INPUT_ACTIONS);
-
-    // All three reuse the `workouts` array read at the top of this function
-    // rather than each re-reading the whole store.
-    await renderWeekProgress(workouts);
-    await refreshSessionCard();
-    await refreshActiveWorkoutSection(workouts);
   }
 
   // 06-catalog-import-backup.js — Exercise manager, classifiers, CSV import, backup & restore
@@ -5559,9 +5669,15 @@
     if (!res.ok || !json || !json.access_token) {
       // A refresh token can genuinely stop working — revoked from Dropbox's
       // own security settings, or this app's permissions changed. Forgetting
-      // it here, rather than retrying forever, is what lets Settings notice
+      // it then, rather than retrying forever, is what lets Settings notice
       // and offer to reconnect instead of failing the same way on every
       // future backup.
+      //
+      // But ONLY then. A 5xx or a rate limit says nothing about the token,
+      // and forgetting it on one turned a passing Dropbox hiccup into a
+      // forced reconnect.
+      const revoked = res.status === 400 || res.status === 401 || (json && json.error === 'invalid_grant');
+      if (!revoked) throw new Error(`Dropbox didn’t respond properly (${res.status || 'no status'}) — try again in a moment.`);
       await setSetting('dropboxRefreshToken', null);
       dropboxAccessToken = null;
       throw new Error('Dropbox needs to be reconnected.');
@@ -5607,17 +5723,29 @@
     }
   }
 
+  // The button stays hidden until DROPBOX_CLIENT_ID is a real App key. With
+  // the placeholder it was live anyway, and tapping it left the app for a
+  // Dropbox error page about an invalid client_id.
+  const DROPBOX_CONFIGURED = !/^REPLACE_/.test(DROPBOX_CLIENT_ID);
+  const DROPBOX_CONNECTED_MSG = 'Connected — backups go to the SplitCraft app folder in your Dropbox.';
+
   async function renderDropboxStatus() {
     const btn = document.getElementById('backup-dropbox-btn');
     const disconnectBtn = document.getElementById('dropbox-disconnect-btn');
     const status = document.getElementById('dropbox-status');
     const connected = !!(await getSetting('dropboxRefreshToken', null));
-    if (btn) btn.textContent = connected ? 'Back Up to Dropbox' : 'Connect Dropbox…';
-    if (disconnectBtn) disconnectBtn.style.display = connected ? '' : 'none';
-    if (status && !status.textContent) {
-      status.textContent = connected
-        ? 'Connected — backups go to the SplitCraft app folder in your Dropbox.'
-        : '';
+    if (btn) {
+      btn.textContent = connected ? 'Back Up to Dropbox' : 'Connect Dropbox…';
+      btn.style.display = DROPBOX_CONFIGURED ? '' : 'none';
+    }
+    if (disconnectBtn) disconnectBtn.style.display = DROPBOX_CONFIGURED && connected ? '' : 'none';
+    // Error text from a failed connection is left alone (it's the one thing
+    // worth reading), but the "Connected" line is this function's own, so it
+    // has to come off again on disconnect — it used to stay up beside a
+    // "Connect Dropbox…" button.
+    if (status) {
+      if (connected) status.textContent = DROPBOX_CONNECTED_MSG;
+      else if (status.textContent === DROPBOX_CONNECTED_MSG) status.textContent = '';
     }
   }
 
@@ -5775,23 +5903,47 @@
   // workouts, so preserving ids keeps every cross-reference intact for free.
   // Merging two devices would mean remapping every id in both directions — a
   // different and much more dangerous feature.
+  //
+  // ALL OR NOTHING. On IndexedDB the whole replacement is one transaction
+  // (idbReplaceAll()), so a failure partway — or the app being closed
+  // mid-restore — rolls back to exactly what was there before instead of
+  // leaving your data cleared and the backup half-written.
+  //
+  // Settings are REPLACED, not merged, which is what "Replace all data"
+  // promises. Merging let a setting the backup didn't carry survive from the
+  // device's old data — an activePlanId pointing at a plan id that, after the
+  // restore, belonged to a different plan. The device-only keys in
+  // BACKUP_EXCLUDED_SETTINGS (API key, Dropbox token, lastBackupAt) are the
+  // exception: they were never in the file, so they're carried over from the
+  // device rather than wiped.
   async function applyRestore(d) {
-    await clearStore('workouts');
-    await clearStore('exercises');
-    await clearStore('exercisePrefs');
-    await clearStore('plans');
-    // restorePut, not putRecord — see restorePut() for why that difference is
-    // load-bearing. Exercises first, so the rows that plans and workouts point
-    // at exist before the things pointing at them.
-    for (const rec of d.exercises) await restorePut('exercises', rec);
-    for (const rec of d.workouts) await restorePut('workouts', rec);
-    for (const rec of d.plans) await restorePut('plans', rec);
-    for (const rec of (d.exercisePrefs || [])) {
-      if (rec && rec.exerciseId != null) await setExercisePref(rec.exerciseId, rec);
-    }
+    const settings = {};
     for (const [key, value] of Object.entries(d.settings || {})) {
-      if (!BACKUP_EXCLUDED_SETTINGS.includes(key)) await setSetting(key, value);
+      if (!BACKUP_EXCLUDED_SETTINGS.includes(key)) settings[key] = value;
     }
+    for (const key of BACKUP_EXCLUDED_SETTINGS) {
+      if (settingsCache.has(key)) settings[key] = settingsCache.get(key);
+    }
+    const prefs = (d.exercisePrefs || [])
+      .filter(rec => rec && rec.exerciseId != null)
+      .map(rec => ({ pinned: false, liked: false, disliked: false, ...rec }));
+
+    if (dbAvailable) {
+      await idbReplaceAll({
+        exercises: d.exercises, workouts: d.workouts, plans: d.plans, exercisePrefs: prefs,
+        settings: Object.entries(settings).map(([key, value]) => ({ key, value })),
+      });
+    } else {
+      // In-memory: nothing here can fail halfway. restorePut, not putRecord —
+      // see restorePut() for why that difference is load-bearing.
+      for (const store of ['workouts', 'exercises', 'exercisePrefs', 'plans']) await clearStore(store);
+      for (const rec of d.exercises) await restorePut('exercises', rec);
+      for (const rec of d.workouts) await restorePut('workouts', rec);
+      for (const rec of d.plans) await restorePut('plans', rec);
+      memory.exercisePrefs = prefs;
+      memory.settings = { ...settings };
+    }
+    replaceSettingsLocally(settings);
     invalidateWorkoutsCache();
     invalidateExercisePicker();
   }
@@ -5896,6 +6048,9 @@
       // come off the outer parsed object while it's still around.
       const restoredExportedAt = pendingRestore.exportedAt;
       await applyRestore(d);
+      // The plans are a different set now — a day index picked against the
+      // old current plan means nothing against the restored one.
+      selectedLogDayIdx = null;
 
       okBox.textContent = `Restored ${d.workouts.length} day(s), ${d.exercises.length} exercises and ${d.plans.length} plan(s). Your API key was left unchanged.`;
       okBox.style.display = 'block';
@@ -5927,7 +6082,9 @@
       }
       toast('Backup restored');
     } catch (err) {
-      errBox.textContent = `Restore failed: ${err.message}. Some data may have been written — reload and check before retrying.`;
+      errBox.textContent = dbAvailable
+        ? `Restore failed: ${err.message}. Nothing was changed — your existing data is still here.`
+        : `Restore failed: ${err.message}. Some data may have been written — reload and check before retrying.`;
       errBox.style.display = 'block';
       reportUnexpected('Backup restore', err);
     } finally {
@@ -5976,14 +6133,6 @@
   ['units-form', 'profile-form', 'workout-form', 'settings-form', 'plan-settings-form'].forEach(id => {
     const form = document.getElementById(id);
     if (form) form.addEventListener('submit', (e) => e.preventDefault());
-  });
-
-  document.getElementById('setting-apikey').addEventListener('change', async (e) => {
-    await setSetting('openrouterKey', e.target.value.trim());
-    await refreshApiKeyStatus();
-  });
-  document.getElementById('setting-model').addEventListener('change', async (e) => {
-    await setSetting('openrouterModel', e.target.value.trim());
   });
 
   // Progression suggestions (Log and Plan tabs) and the pace/setup/session
@@ -7020,12 +7169,19 @@
       * (ENERGY_MULTIPLIER[modifiers.energy] ?? 1)
       * rirRateMultiplier(modifiers.rir);
     const target = load * pct * scale;
+    // `target` is in REAL load, and so must be the jump it's compared with. A
+    // perSide lift's step is per implement — one 2kg step on each dumbbell
+    // moves the real load by 4kg — and comparing the target against a single
+    // step progressed per-side lifts at up to twice the intended rate. The
+    // returned incrementKg stays in LOGGED units (per side), because that's
+    // what the caller adds it to.
+    const realStep = exercise && exercise.perSide ? step * 2 : step;
 
-    if (target >= step) {
-      return { incrementKg: Math.round(target / step) * step, sessionsRequired: baseSessions };
+    if (target >= realStep) {
+      return { incrementKg: Math.round(target / realStep) * step, sessionsRequired: baseSessions };
     }
     // target of 0 (bodyweight-only work logged at 0) would divide to Infinity.
-    const spread = target > 0 ? Math.ceil(step / target) : baseSessions;
+    const spread = target > 0 ? Math.ceil(realStep / target) : baseSessions;
     // Cap it: past about six clean sessions at one weight the prescription
     // people actually need is a different exercise or a deload, not a longer
     // wait, and an uncapped number reads as broken.
@@ -7065,13 +7221,13 @@
   // ageRateMultiplier() — a defensible shape, NOT numbers from a study, and
   // they only ever seed a first guess the user is about to overwrite.
   //
-  // Dumbbells carry a real ambiguity worth naming: the Fitbod importer stores
-  // them as TOTAL load (it multiplies by the export's `multiplier` of 2.0),
-  // while someone typing a dumbbell press by hand almost certainly enters the
-  // per-hand number. Both shapes exist in the same store and nothing
-  // distinguishes them. That ambiguity cancels out entirely within the
-  // same-equipment tier — per-hand history seeds a per-hand estimate — which
-  // is the main reason the cross-equipment tiers below are deliberately timid.
+  // Dumbbell numbers come in two shapes: a `perSide` exercise stores what's
+  // on ONE dumbbell, everything else stores the total (the Fitbod importer
+  // halves a perSide lift's file total back to one side — see
+  // 06-catalog-import-backup.js). estimateStartingWeight() compares them all
+  // as totals and converts back to per-side for a perSide target, so a
+  // per-hand history and a combined one can seed each other without one
+  // reading as twice (or half) the other.
   const EQUIP_LOAD_RATIO = {
     barbell: 1, machine: 0.9, cable: 0.5, dumbbell: 0.45, other: 0.7
   };
@@ -7195,7 +7351,9 @@
       if (!rec) continue;
       const rEquip = exerciseEquipment(rec);
       rows.push({
-        rec, weight: r.weight, equip: rEquip,
+        // As a TOTAL, so per-side and combined histories compare like for
+        // like (see EQUIP_LOAD_RATIO's comment). Converted back below.
+        rec, weight: rec.perSide ? r.weight * 2 : r.weight, equip: rEquip,
         muscle: rec.primaryMuscle,
         region: (musclesById[rec.primaryMuscle] || {}).region
       });
@@ -7275,7 +7433,9 @@
       return null;
     }
 
-    const raw = median(values) * haircut;
+    // Back from a total to how THIS exercise is logged: one dumbbell's worth
+    // for a perSide lift.
+    const raw = median(values) * haircut * (exercise.perSide ? 0.5 : 1);
     if (!isFinite(raw) || raw <= 0) return null;
     const rounded = Math.max(step, Math.round(raw / step) * step);
     return {
@@ -7574,7 +7734,9 @@
   async function renderExercisePickerBody(query) {
     const body = document.getElementById('exercise-picker-body');
     const groups = await groupedExercisesForPicker();
-    const q = query.trim().toLowerCase();
+    // nameKey(), like every other name match in the app, so "pull up" finds
+    // "Pull-Up".
+    const q = nameKey(query);
     let html;
     if (q) {
       // Searching flattens the muscle hierarchy — useful for browsing when
@@ -7582,7 +7744,7 @@
       // a name you already know.
       const matches = [];
       groups.forEach(g => g.exercises.forEach(ex => {
-        if (!exercisePickerExcludeIds.has(ex.id) && ex.name.toLowerCase().includes(q)) matches.push(ex);
+        if (!exercisePickerExcludeIds.has(ex.id) && nameKey(ex.name).includes(q)) matches.push(ex);
       }));
       matches.sort((a, b) => a.name.localeCompare(b.name));
       html = matches.length
@@ -7648,6 +7810,12 @@
     // an existing exercise instead of forking a near-miss duplicate that
     // would split that lift's history in two.
     const existing = (await getAllRecords('exercises')).find(ex => nameKey(ex.name) === nameKey(name));
+    // Typing a name the list deliberately left out (it's already on the day)
+    // must not sneak it in through the back door.
+    if (existing && exercisePickerExcludeIds.has(existing.id)) {
+      toast(`"${existing.name}" is already part of this day`, 'err');
+      return;
+    }
     const id = existing ? existing.id : await addRecord('exercises', { name, primaryMuscle: muscle, secondaryMuscles: [], equipment: classifyEquipmentFromName(name), custom: true });
     invalidateExercisePicker();
     const cb = exercisePickerOnSelect;
@@ -7748,6 +7916,7 @@
     if (logged) await announcePersonalRecord(exerciseId, activeWorkoutCtx.exercisesById[exerciseId], activeWorkoutCtx.allWorkouts, logged.sets[logged.sets.length - 1]);
     closeDropMyoModal();
     startRestTimer();
+    noteWorkoutActivity();
     await refreshLogAndHistory();
     await maybeAutoStartAppleFitness(workout);
   });
@@ -7916,6 +8085,7 @@
         if (isFirstOfActiveSupersetPair(day, origExerciseId, workout.exerciseSwaps, supersetsOn)) hideTimerSheet();
         else if (shouldRestAfter(done, prescribed)) startRestTimer();
         else hideTimerSheet();
+        noteWorkoutActivity();
         revealNextOnRender = exerciseId;
         await refreshLogAndHistory();
         await maybeAutoStartAppleFitness(workout);
@@ -7931,11 +8101,19 @@
       await refreshActiveWorkoutSection();
     },
     'delete-set': async (el) => {
+      // Addressed by the set's own ts (deleteSet() falls back to the index
+      // only if a row somehow lacks one), so a second tap that lands before
+      // the repaint finds its set already gone and does nothing — by index
+      // it deleted the NEXT set. Disabled for the same reason the Log button
+      // is: one tap, one action.
+      if (el.disabled) return;
+      el.disabled = true;
       const today = activeWorkoutCtx.today;
       const w = await getWorkoutForDate(today);
       if (!w) return;
       const exerciseId = Number(el.dataset.exid);
-      const removed = await deleteSet(w.id, exerciseId, Number(el.dataset.idx));
+      const ts = el.dataset.ts ? Number(el.dataset.ts) : undefined;
+      const removed = await deleteSet(w.id, exerciseId, Number(el.dataset.idx), ts);
       await refreshLogAndHistory();
       if (removed) {
         toast('Set deleted', 'ok', { duration: 6000, action: { label: 'Undo', onClick: async () => {
@@ -7974,9 +8152,17 @@
       if (!group) return;
       const origExerciseId = Number(group.dataset.origExid);
       const currentEffectiveId = Number(group.dataset.exid);
+      // Everything already on today's list is off the table — picking one
+      // gave two cards the same exercise id, which the whole Log tab
+      // addresses sets by (the Plan tab's Swap already excluded its day).
+      // The slot's own planned exercise stays pickable, so a swap can be
+      // undone by swapping back.
+      const excludeIds = exerciseIdsOnToday(activeWorkoutCtx);
+      excludeIds.delete(origExerciseId);
+      excludeIds.add(currentEffectiveId);
       await openExercisePicker({
         title: 'Swap for today',
-        excludeIds: new Set([currentEffectiveId]),
+        excludeIds,
         onSelect: async (newExerciseId) => {
           await setSessionSwap(origExerciseId, newExerciseId);
           await refreshActiveWorkoutSection();
@@ -8022,10 +8208,11 @@
       if (isNaN(weight) || isNaN(reps)) return;
       const exerciseId = Number(row.dataset.exid);
       const setIndex = Number(row.dataset.idx);
+      const ts = row.dataset.ts ? Number(row.dataset.ts) : undefined;
       const originalKg = parseFloat(row.dataset.kg);
       const w = await getWorkoutForDate(activeWorkoutCtx.today);
       if (!w) return;
-      await updateStandardSet(w.id, exerciseId, setIndex, weightToStore(weight, originalKg), reps);
+      await updateStandardSet(w.id, exerciseId, setIndex, weightToStore(weight, originalKg), reps, ts);
       await refreshLogAndHistory();
     },
   };
@@ -8072,6 +8259,12 @@
     // See the comment on activeWorkoutCtx's declaration above.
     activeWorkoutCtx = { plan, dayIdx, day, today, allWorkouts, exercisesById };
     const todayWorkout = allWorkouts.find(w => w.date === today) || null;
+    // The suggestion is a plan for TODAY'S session, so it's judged on the
+    // sessions before it. Fed today's half-finished sets too, it re-judged
+    // after every log: set 1 at 8 reps turned "try 102.5 × 8" into "Stay at
+    // 102.5, aim for 9 reps" (asking for MORE reps on the next set of the
+    // same session), and a logged warm-up re-anchored it on the warm-up.
+    const priorWorkouts = allWorkouts.filter(w => w.date !== today);
     // Read once for the whole render — the off switch (Settings → Workout)
     // gates both the pairing tag below and the rest-timer exception in
     // WORKOUT_CLICK_ACTIONS['log-set'], and both need to agree on it for the
@@ -8105,7 +8298,7 @@
         const swappedEx = exercisesById[swappedId];
         effectiveName = swappedEx ? swappedEx.name : slot.name;
       }
-      const suggestion = await suggestForExercise(effectiveExerciseId, slot.repRangeMin, slot.repRangeMax, slot.targetSets, allWorkouts, exercisesById);
+      const suggestion = await suggestForExercise(effectiveExerciseId, slot.repRangeMin, slot.repRangeMax, slot.targetSets, priorWorkouts, exercisesById);
       const exEntry = todayWorkout ? todayWorkout.exercises.find(e => e.exerciseId === effectiveExerciseId) : null;
       const todaySets = exEntry ? exEntry.sets : [];
       const doneCount = todaySets.length;
@@ -8154,12 +8347,12 @@
           const s = todaySets[i];
           if (s.type === 'standard') {
             setRowsHtml += `
-              <div class="plan-log-row done-set" data-exid="${effectiveExerciseId}" data-idx="${i}" data-kg="${s.entries[0].weight}">
+              <div class="plan-log-row done-set" data-exid="${effectiveExerciseId}" data-idx="${i}" data-ts="${s.ts}" data-kg="${s.entries[0].weight}">
                 <span class="set-idx">${setNum}</span>
                 ${signBtnHtml(s.entries[0].weight < 0)}
                 ${weightFieldHtml(`<input type="number" inputmode="decimal" step="0.5" class="set-edit-weight" data-action="edit-set" aria-label="Weight" value="${displayWeight(s.entries[0].weight)}">`, exercisesById[effectiveExerciseId])}
                 <input type="number" inputmode="numeric" step="1" min="1" class="set-edit-reps" data-action="edit-set" aria-label="Reps" value="${s.entries[0].reps}">
-                <button class="del" data-exid="${effectiveExerciseId}" data-idx="${i}" data-action="delete-set" title="Delete set">×</button>
+                <button class="del" data-exid="${effectiveExerciseId}" data-idx="${i}" data-ts="${s.ts}" data-action="delete-set" title="Delete set">×</button>
               </div>
             `;
           } else {
@@ -8167,18 +8360,25 @@
               <div class="set-row">
                 <span class="set-idx">${setNum}</span>
                 <span class="set-data">${esc(formatSetLine(s))}</span>
-                <button class="del" data-exid="${effectiveExerciseId}" data-idx="${i}" data-action="delete-set" title="Delete set">×</button>
+                <button class="del" data-exid="${effectiveExerciseId}" data-idx="${i}" data-ts="${s.ts}" data-action="delete-set" title="Delete set">×</button>
               </div>
             `;
           }
         } else if (i === doneCount) {
           const label = setNum > effectiveTarget ? `${setNum}+` : `${setNum}`;
-          const wVal = suggestion.weight != null ? displayWeight(suggestion.weight) : '';
-          const rVal = suggestion.reps != null ? suggestion.reps : '';
+          // Mid-session, the next set starts from the one just logged — what
+          // you actually loaded and managed today — rather than re-proposing
+          // the session's opening suggestion (which may be a weight you chose
+          // not to use). The first set of the day takes the suggestion.
+          const lastToday = doneCount ? workingEntry(todaySets[doneCount - 1]) : null;
+          const prefillKg = lastToday ? lastToday.weight : suggestion.weight;
+          const prefillReps = lastToday ? lastToday.reps : suggestion.reps;
+          const wVal = prefillKg != null ? displayWeight(prefillKg) : '';
+          const rVal = prefillReps != null ? prefillReps : '';
           setRowsHtml += `
             <div class="plan-log-row next-set">
               <span class="set-idx">${label}</span>
-              ${signBtnHtml(suggestion.weight != null && suggestion.weight < 0)}
+              ${signBtnHtml(prefillKg != null && prefillKg < 0)}
               ${weightFieldHtml(`<input type="number" inputmode="decimal" step="0.5" aria-label="Weight in ${weightUnit}" class="plan-log-weight" data-action="sync-sign" value="${wVal}">`, exercisesById[effectiveExerciseId])}
               <input type="number" inputmode="numeric" step="1" min="1" placeholder="reps" aria-label="Reps" class="plan-log-reps" value="${rVal}">
               <button type="button" class="log-btn" data-action="log-set">Log</button>
@@ -8297,6 +8497,23 @@
     delegate(container, 'input', WORKOUT_INPUT_ACTIONS);
   }
 
+  // Every exercise id with a card on today's list: the day's planned slots,
+  // whatever they've been swapped to today, and today's added extras. One
+  // card per exercise is the invariant everything here relies on, so this is
+  // what any "pick an exercise for today" excludes.
+  function exerciseIdsOnToday(ctx) {
+    const { day, allWorkouts, today } = ctx;
+    const todayWorkout = allWorkouts.find(w => w.date === today) || null;
+    const ids = new Set(day.exercises.map(ex => ex.exerciseId));
+    if (todayWorkout && todayWorkout.exerciseSwaps) {
+      Object.values(todayWorkout.exerciseSwaps).forEach(id => ids.add(id));
+    }
+    if (todayWorkout && todayWorkout.extraExercises) {
+      todayWorkout.extraExercises.forEach(ex => ids.add(ex.exerciseId));
+    }
+    return ids;
+  }
+
   // Opens the exercise picker to add an off-plan exercise to TODAY only,
   // as a normal card (target sets/rep range from Settings' plan defaults,
   // same as a fresh plan would use) rather than the old "Log a set
@@ -8305,15 +8522,8 @@
   // activeWorkoutCtx is always populated whenever this can actually fire.
   document.getElementById('add-exercise-btn').addEventListener('click', async () => {
     if (!activeWorkoutCtx) return;
-    const { plan, day, allWorkouts, today } = activeWorkoutCtx;
-    const todayWorkout = allWorkouts.find(w => w.date === today) || null;
-    const excludeIds = new Set(day.exercises.map(ex => ex.exerciseId));
-    if (todayWorkout && todayWorkout.exerciseSwaps) {
-      Object.values(todayWorkout.exerciseSwaps).forEach(id => excludeIds.add(id));
-    }
-    if (todayWorkout && todayWorkout.extraExercises) {
-      todayWorkout.extraExercises.forEach(ex => excludeIds.add(ex.exerciseId));
-    }
+    const { plan } = activeWorkoutCtx;
+    const excludeIds = exerciseIdsOnToday(activeWorkoutCtx);
     // "The normal set and rep range" means THIS plan's own — not whatever
     // the Plan tab's form currently holds, which can drift from the active
     // plan if it was edited without regenerating. Settings is only the
@@ -8352,6 +8562,19 @@
   // triggered by refreshLogAndHistory, instead of snapping back to whatever
   // today's workout record implies every time a set is logged.
   let selectedLogDayIdx = null;
+  // ...but only for the session it was chosen in. The pick used to live until
+  // a full reload, so an installed app resumed the next morning still showed
+  // yesterday's day instead of rotating to the next one. It's tied to the
+  // date it was chosen on and the last time the workout was touched, so a
+  // new day starts a fresh pick — except mid-workout across midnight, which
+  // keeps going on the day already being trained.
+  let selectedLogDayDate = null;
+  let lastWorkoutActivityTs = 0;
+  const DAY_PICK_IDLE_MS = 3 * 3600000;
+  function noteWorkoutActivity() { lastWorkoutActivityTs = Date.now(); }
+  function dayPickIsStale(pickDate, today, lastActivityTs, now) {
+    return pickDate != null && pickDate !== today && now - lastActivityTs > DAY_PICK_IDLE_MS;
+  }
 
   // `workouts` is optional and purely an optimisation — passed down by
   // refreshLogAndHistory(), which has already read the store, and omitted by
@@ -8367,7 +8590,9 @@
       return;
     }
     wrap.style.display = 'block';
+    if (dayPickIsStale(selectedLogDayDate, todayStr(), lastWorkoutActivityTs, Date.now())) selectedLogDayIdx = null;
     if (selectedLogDayIdx == null || selectedLogDayIdx >= plan.days.length) {
+      selectedLogDayDate = todayStr();
       const todayWorkout = workouts
         ? workouts.find(w => w.date === todayStr()) || null
         : await getWorkoutForDate(todayStr());
@@ -8402,6 +8627,8 @@
     // and the store may have moved on since the render that wired this.
     daySelect.onchange = async () => {
       selectedLogDayIdx = Number(daySelect.value);
+      selectedLogDayDate = todayStr();
+      noteWorkoutActivity();
       await renderActiveWorkout(plan, selectedLogDayIdx);
     };
     await renderActiveWorkout(plan, selectedLogDayIdx, workouts);
@@ -9453,12 +9680,24 @@ ${schemaExample}`;
       if (!Array.isArray(day.exercises)) {
         throw new Error(`The model returned a day ("${day.name || 'unnamed'}") with no exercise list — try again.`);
       }
+      // An entry with no usable name can't be matched to anything, and used
+      // to be saved as a brand-new exercise with no name at all.
+      const named = day.exercises.filter(ex => ex && typeof ex.name === 'string' && ex.name.trim());
+      if (named.length < day.exercises.length) {
+        logPlanStatus(`Skipped ${day.exercises.length - named.length} unnamed exercise entr${day.exercises.length - named.length === 1 ? 'y' : 'ies'} in "${day.name || 'a day'}".`);
+      }
+      day.exercises = named;
       for (const ex of day.exercises) {
+        ex.name = ex.name.trim();
         const key = nameKey(ex.name);
         let match = byName.get(key);
         if (!match) {
-          const newId = await addRecord('exercises', { name: ex.name, primaryMuscle: 'unclassified', secondaryMuscles: [], equipment: classifyEquipmentFromName(ex.name), custom: true });
-          match = { id: newId, name: ex.name, primaryMuscle: 'unclassified' };
+          // Same name-based guess the Fitbod importer makes. 'unclassified'
+          // put every invented exercise into the weekly-sets chart's
+          // Unclassified bar until someone fixed it by hand.
+          const primaryMuscle = classifyMuscleFromName(ex.name);
+          const newId = await addRecord('exercises', { name: ex.name, primaryMuscle, secondaryMuscles: [], equipment: classifyEquipmentFromName(ex.name), custom: true });
+          match = { id: newId, name: ex.name, primaryMuscle };
           byName.set(key, match);
           createdExerciseIds.push(newId);
         }
@@ -9641,19 +9880,25 @@ ${schemaExample}`;
 
     logPlanStatus(`Estimating starting weights for ${needed.length} new exercise(s) from ${anchors.length} logged lift(s)…`);
 
+    // perSide lifts are logged as ONE dumbbell's weight (see effectiveLoadKg(),
+    // 08-progression.js), and nothing in a bare number says so — the model
+    // was told to "match how their existing dumbbell entries are expressed"
+    // with no way to tell which convention any of them used. Labelled
+    // explicitly instead, both ways.
+    const PER_HAND = ' per hand (one dumbbell — the real load is double)';
     const prompt = `This lifter is ${experience}. ${bw} All weights are KILOGRAMS.
 
 Their most recent top set on each exercise they have actually trained:
-${anchors.map(a => `${describe(a.rec)}: ${Math.round(a.weight * 100) / 100}kg`).join('\n')}
+${anchors.map(a => `${describe(a.rec)}: ${Math.round(a.weight * 100) / 100}kg${a.rec.perSide ? PER_HAND : ''}`).join('\n')}
 
 They are about to start these exercises for the FIRST time:
-${needed.map(n => `${describe(n.rec)} — target ${n.repRangeMin}-${n.repRangeMax} reps`).join('\n')}
+${needed.map(n => `${describe(n.rec)} — target ${n.repRangeMin}-${n.repRangeMax} reps${n.rec.perSide ? ' [per hand]' : ''}`).join('\n')}
 
 For each one, estimate a sensible working weight for their FIRST session, in kilograms, based on the strength they have demonstrated above and the normal strength relationships between these movements.
 
 Rules:
 - Err on the LIGHT side. A first set that is too light costs nothing; too heavy on an unfamiliar movement risks injury.
-- Give the weight the way this app logs it: for dumbbell exercises, match how their existing dumbbell entries above are expressed.
+- For an exercise marked [per hand], give the weight of ONE dumbbell. For everything else, give the total load.
 - For assisted machines (assisted pull-up/dip), give a NEGATIVE number: the amount of assistance.
 - Use 0 only if the movement is genuinely unloaded.
 - Every name must be copied EXACTLY from the list above.
@@ -9681,7 +9926,11 @@ Respond with ONLY valid JSON, no markdown, exactly:
     // lifter has ever logged, so that — with a little headroom — is the
     // ceiling. Anything outside it is DROPPED, not clamped: the heuristic
     // then fills the gap and the log says which ones were rejected.
-    const heaviest = anchors.reduce((m, a) => Math.max(m, a.weight), 0);
+    // In real (total) load on both sides of the comparison, so a per-hand
+    // anchor isn't half its true size and a per-hand estimate isn't let
+    // through at double the intended ceiling.
+    const realKg = (rec, kg) => (rec.perSide ? kg * 2 : kg);
+    const heaviest = anchors.reduce((m, a) => Math.max(m, realKg(a.rec, a.weight)), 0);
     const ceiling = heaviest > 0 ? heaviest * 1.25 : 0;
 
     const byKey = new Map(needed.map(n => [nameKey(n.rec.name), n.rec]));
@@ -9700,8 +9949,8 @@ Respond with ONLY valid JSON, no markdown, exactly:
         }
       } else if (kg < 0) {
         rejected.push(`${rec.name}: negative weight on a non-assisted lift`); continue;
-      } else if (ceiling > 0 && kg > ceiling) {
-        rejected.push(`${rec.name}: ${kg}kg exceeds ${Math.round(ceiling)}kg (1.25x your heaviest logged set)`); continue;
+      } else if (ceiling > 0 && realKg(rec, kg) > ceiling) {
+        rejected.push(`${rec.name}: ${kg}kg${rec.perSide ? ' per hand' : ''} exceeds ${Math.round(ceiling)}kg (1.25x your heaviest logged set)`); continue;
       }
       // Snap to something the equipment can actually be loaded to.
       const step = loadStepKg(rec);
@@ -9934,7 +10183,17 @@ Respond with ONLY valid JSON, no markdown, exactly:
     handleDropboxRedirect().then(renderDropboxStatus).catch(() => {});
   }
 
-  document.getElementById('today-label').textContent = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+  renderTodayLabel();
+
+  // An installed app is often RESUMED rather than relaunched — opened from the
+  // home screen days after it was last used, with the page still in memory.
+  // Nothing re-rendered on that: the header kept the old date and the Log tab
+  // kept yesterday's day of the split. Catch up when the app comes back on a
+  // different calendar day than it last drew.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden || lastRefreshDate === null || lastRefreshDate === todayStr()) return;
+    refreshLogAndHistory().then(refreshPlanTab).catch(err => reportUnexpected('New-day refresh', err));
+  });
 
   // The storage fallback is attached to openDB() ONLY.
   //

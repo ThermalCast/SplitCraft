@@ -349,11 +349,22 @@ exhaustive.
   standard is a single weight+reps row; drop/myo show repeatable rows with an
   "Add Drop" / "Add Myo Cluster" button, filled in after finishing the whole
   set in real life.
-- **History is delete-locked.** `renderExerciseGroup()` takes an
-  `allowDelete` flag (default `true`); the History tab passes `false`, so
-  past days render without a delete button — once a day isn't today anymore,
-  it's locked in. Inline editing of standard sets' weight/reps is unaffected
-  — only deletion is restricted to today.
+- **History is delete-locked.** `renderExerciseGroup()` (used only by the
+  History tab) renders no delete button at all, and `HISTORY_CLICK_ACTIONS`
+  has no `'delete-set'` — once a day isn't today anymore, it's locked in.
+  Today's sets are deleted from the active workout's own card. Inline editing
+  of standard sets' weight/reps is unaffected — only deletion is restricted
+  to today. (An `allowDelete` flag and a matching History delete handler
+  used to exist as unreachable wiring; the handler would have restored an
+  Undo into TODAY's record rather than the past day's, so both were removed
+  rather than left to be switched on by accident.)
+- **A set is addressed by its timestamp, not its position.** Logged rows
+  carry `data-ts`, and `deleteSet()`/`updateStandardSet()` take it as
+  `expectTs` (falling back to the index only when a caller has none). The
+  write lock serialises a double-tapped ×, and by index the second call
+  removed whatever had slid into that position — the NEXT set. By ts, the
+  second call finds its set already gone and does nothing; the × is also
+  disabled while its delete runs.
 - **Set rows are `[n] [weight] [reps] [Log]`**, single-line
   (`flex-wrap: nowrap`), so every set is the same height and a list of them
   scans as a column. There are no reps-stepper buttons — see Part 2.
@@ -376,6 +387,17 @@ exhaustive.
   `{ weight: null, reps: repRangeMin }` when nothing is logged yet — the
   weight box stays empty (nothing to suggest) but the rep target is
   prescribed by the plan, so it's never left blank for no reason.
+- **The suggestion is judged on the sessions BEFORE today, and holds still
+  all session.** `renderActiveWorkout()` passes `suggestForExercise()` only
+  `priorWorkouts` (today excluded). Fed today's half-finished sets, it
+  re-judged after every log: set 1 at 8 reps turned "try 102.5 × 8" into
+  "Stay at 102.5, aim for 9 reps" — more reps on the next set of the SAME
+  session — and a logged warm-up re-anchored it on the warm-up weight.
+- **Mid-session, the next set starts from the one just logged.** Once a set
+  is on the board today, the next-set row is prefilled with that set's own
+  weight and reps (its working entry, for a drop/myo set) rather than the
+  session's opening suggestion, which may be a weight you chose not to use.
+  The first set of the day takes the suggestion.
 - **Warm-up ramp.** `warmupSets(workingKg, exercise)` (`08-progression.js`)
   proposes up to three warm-up sets at 50%×8, 70%×5 and 85%×2 of the
   suggested working weight, each rounded to the exercise's loadable step
@@ -477,6 +499,8 @@ Deliberately decoupled from set-logging — sets save immediately on every
 the session happened and *how long* it took. Pressing Start again after
 Complete keeps the original `startedAt` and clears `endedAt`/`durationMs`,
 so completing early and resuming still gives an accurate total duration.
+The button says **"Resume Session"** after Complete for exactly that reason —
+it used to say "Start New Session", promising a fresh clock it never gave.
 Weekly-progress and History both exclude workouts with zero logged
 exercises, so a session with no set logged still doesn't inflate either.
 
@@ -613,10 +637,23 @@ what age they are on every exercise.
 **Day-picker stickiness**: which day the workout tab is showing
 (`selectedLogDayIdx`, a plain in-memory variable) is preserved across
 re-renders triggered by logging/deleting sets. It resets to the plan's
-default on page load and after generating a new plan — not on every
-`refreshPlanTab()` call, which also runs after settings saves, equipment
-changes, a unit switch, import and restore, none of which should knock the
-picker back to today.
+default on page load, after generating a new plan, after reactivating a
+past plan, and after a restore — not on every `refreshPlanTab()` call,
+which also runs after settings saves, equipment changes and a unit switch,
+none of which should knock the picker back to today.
+
+**...but only for the day it was picked.** An installed app is usually
+*resumed*, not relaunched, so "until a reload" used to mean "until whenever
+the OS happened to evict it" — the next morning still showed yesterday's
+day. The pick now remembers the date it was made on (`selectedLogDayDate`)
+and when the workout was last touched (`noteWorkoutActivity()`, on every
+logged set and day pick). `dayPickIsStale()` drops it once the date has
+changed AND nothing has been logged for 3 hours, so a new day starts a fresh
+rotation while a workout running past midnight keeps going on the day being
+trained. Coming back to the app on a different calendar day than it last
+drew (`lastRefreshDate`, checked on `visibilitychange` in 12-init.js) also
+re-renders everything, including the header date (`renderTodayLabel()`),
+which used to be written once at load.
 
 **The default rotates the split automatically.** If today already has a
 workout logged against the CURRENT plan, that workout's own `dayIndex` wins
@@ -642,8 +679,13 @@ Settings' plan-rep-range fields are only the fallback, for a plan record
 old enough to predate these fields. It renders as a normal card — suggestion, warm-up,
 set rows — identically to a plan exercise, just tagged "added today" instead
 of showing a Swap button. Excludes exercises already on the day (plan slots,
-their session swaps, and anything already added) so picking twice can't
-create two slots for one exercise. A card with nothing logged against it yet
+their session swaps, and anything already added —
+`exerciseIdsOnToday()`) so picking twice can't create two slots for one
+exercise. The Workout tab's session-only **Swap** uses the same exclusion
+(it used to exclude only the exercise being swapped, so you could swap a
+slot into an exercise already on the day and get two cards sharing an
+exercise id), except that the slot's own planned exercise stays pickable so
+a swap can be undone by swapping back. A card with nothing logged against it yet
 gets a "Remove" button instead of Swap (`removeExtraExercise()` — refuses
 once a set exists, since real training data isn't a mistake to silently
 discard).
@@ -658,7 +700,10 @@ order (not alphabetical — related muscles land near each other) and each
 group starts collapsed, so browsing 90+ exercises isn't one long scroll. A
 "Can't find it? Add a new exercise" footer reveals the same quick-add
 (name + muscle) every entry point used to have, and selects the new exercise
-immediately. The modal itself is generic — `{ excludeIds, onSelect, title }`
+immediately — unless the typed name resolves to an exercise the caller
+excluded, which is refused with a toast rather than slipping in through the
+back door. Search matches on `nameKey()`, like every other name search in
+the app, so "pull up" finds "Pull-Up". The modal itself is generic — `{ excludeIds, onSelect, title }`
 — it has no idea whether a pick means a swap or an addition; that's entirely
 the caller's business. Grouped-list building
 (`groupedExercisesForPicker()`/`buildGroupedExercises()`) is cached the same
@@ -982,6 +1027,17 @@ that jump is taken:
 Average rate tracks the target percentage at any load, on any equipment, and
 every modifier stays visible. Session count is capped at 6 — past that, what
 a lifter needs is a deload or a different exercise, not a longer wait.
+
+**For a `perSide` lift the step is per implement, so the comparison is made
+in real load.** The target is a percentage of the REAL load (both
+dumbbells), and one step on each dumbbell moves that real load by TWO steps.
+`progressionPlan()` compares the target against `realStep` (2 × step for a
+perSide exercise) for both the jump size and `ceil(realStep / target)`,
+while still returning `incrementKg` in logged (per-hand) units, since that's
+what the caller adds it to. Comparing against a single step progressed
+per-side lifts at up to twice the intended rate: 30kg per hand (60kg real)
+at intermediate was offered a 2.27kg-per-hand jump every 2 sessions — the
+same schedule a 60kg combined lift gets for a jump half the size.
 
 **Measured across the three experience levels**, the floor's size decides
 whether the percentages mean anything at all:
@@ -1437,8 +1493,18 @@ this way instead of inline.
 - **Exercise selection is constrained to the existing library**: the full
   current `exercises` list (names only, minus disliked ones), embedded in
   the prompt with an instruction to choose exclusively from it. Matching
-  against the store is case-insensitive with an auto-create fallback
-  (tagged `unclassified`) if the model deviates anyway.
+  against the store is case-insensitive with an auto-create fallback if the
+  model deviates anyway — given a muscle guessed from the name by
+  `classifyMuscleFromName()` (it used to be tagged `unclassified`, putting
+  every invented exercise into the weekly-sets chart's Unclassified bar). An
+  entry with no usable name is skipped and logged rather than saved as an
+  exercise with no name.
+- **The new plan becomes current by id.** `generatePlanWithAI()` saves the
+  plan and then `setCurrentPlan(plan.id)`. Until `addRecord()` stamped the
+  generated id back onto the object (see "Writes settle on the transaction"
+  under Data integrity), `plan.id` was `undefined` on a real device and the
+  app was only finding the new plan through the newest-by-`createdAt`
+  fallback.
 - **Previous plan is included for variety**: the most recently generated
   plan (day names and exercise lists only) is summarized into the prompt
   with an instruction to vary from it — but only a plan actually **trained
@@ -1715,8 +1781,9 @@ edit-but-not-delete like every other history row.
 
 Filtering happens at the **exercise** level, not the set level — it answers
 "how has my bench gone?" rather than showing whole squat days that happened
-to include a bench set, and set indices stay valid for the delete/inline-edit
-handlers, which address a set by its position in `exEntry.sets`. The
+to include a bench set, and set indices stay valid for the inline-edit
+handler (which addresses a set by its `ts`, falling back to its position in
+`exEntry.sets`). The
 filtered workouts are shallow copies, so nothing writes through to the
 cached store. Debounced at 200ms.
 
@@ -1733,9 +1800,8 @@ sessions with a "Show all N sessions" button (`historyShowAll`).
 
 Hand-rolled inline SVG plus flex bars — no charting library, so nothing to
 fetch and offline use is unaffected. Everything is sized by `viewBox` with
-`width: 100%`, never measured pixel dimensions (these render while the
-History panel is `display: none`). Five blocks, all fed from the same
-in-range set (`historyRanged`):
+`width: 100%`, never measured pixel dimensions. Five blocks, all fed from the
+same in-range set (`historyRanged`):
 
 - **Summary strip** — sessions, working sets, total volume, average session
   duration.
@@ -1746,8 +1812,12 @@ in-range set (`historyRanged`):
   exercise's `primaryMuscle`. Sets, not volume (volume is dominated by heavy
   compounds and zero for bodyweight work). Per week, not a raw total —
   normalised against the ~10–20 hard-sets/week guidance in the strength and
-  hypertrophy literature — divided by weeks actually **trained** (first to
-  last session in range), not the calendar length of the range. Shows all
+  hypertrophy literature — divided by weeks actually **trained**, not the
+  calendar length of the range. `trainingWeeks(dates)` counts that as the
+  first-to-last span **plus one average gap between sessions**: N sessions
+  spaced d days apart are N×d days of training, and first-to-last alone is
+  only (N−1)×d — four weeks of Mon/Wed/Fri spans 25 days, which read as 3.6
+  weeks and overstated every bar by ~12%. Shows all
   16 muscles rather than a top 10, since the absent ones are the point.
   Built from flex/grid rows (not SVG) so muscle names stay real, selectable
   text; `.bar-track` and `.bar-fill` both set `display: block` explicitly
@@ -1804,6 +1874,20 @@ more than one calendar year. Bars and dots carry SVG `<title>` elements for
 desktop hover values. An empty range hides the whole `#history-charts` block
 rather than stacking near-identical "no data" cards.
 
+### History renders only while it's showing
+
+Every logged set ends in `refreshLogAndHistory()`, and that used to rebuild
+History's whole session list and all five charts on each one — work nobody
+could see from the Workout tab, growing with history. Now
+`refreshLogAndHistory()` keeps only what the Workout tab needs (today's
+volume, the week counter, the session card, the active workout) and calls
+`refreshHistoryTab()` only when `historyTabVisible()`; otherwise it marks
+History `historyStale`. `showTab()` (03-helpers.js) catches it up on the way
+in. History's own controls (range, search, Show all) rebuild just History.
+The test harness's stub History panel reports itself active so every suite
+that reads History output still sees it rendered; `features.mjs` flips that
+off to test the lazy path itself.
+
 ## CSV import (Fitbod export)
 
 Settings → Import Data. Brings in workout history exported from Fitbod (one
@@ -1836,10 +1920,9 @@ row per completed set).
   day/exercise.
 - **Exercise matching/creation** mirrors the AI-plan-generation path:
   case-insensitive (`nameKey()`) match against existing `exercises`;
-  unmatched names get created as `custom:true`. Unlike AI generation, the
-  importer runs each new name through `classifyMuscleFromName()` (see
-  Equipment taxonomy & classifiers above) rather than tagging
-  `unclassified`.
+  unmatched names get created as `custom:true`, each run through
+  `classifyMuscleFromName()` (see Equipment taxonomy & classifiers above) —
+  the same guess AI generation now makes for a name it invents.
 - **Preview-then-confirm**: selecting a file parses entirely client-side and
   shows a summary (set/day counts, date range, skip counts) without writing
   anything; "Confirm Import" commits it.
@@ -1874,6 +1957,14 @@ tier — a new Pec Deck matches the fly (30kg), not an average with the bench
 `secondaryMuscles: []` and look like isolations regardless, so when nothing
 matches the filter drops away and the tier behaves as before.
 
+**Per-hand and combined histories are compared as totals.** A `perSide`
+lift stores one dumbbell's weight, everything else the total, and nothing in
+a bare number says which. Each candidate's weight is doubled to a total if
+its exercise is `perSide`, and the result is halved back for a `perSide`
+target — so a 40kg combined press seeds a per-hand fly at ~17kg rather than
+~34kg, and a 20kg-per-hand press seeds a combined lift at ~34kg rather than
+~17kg.
+
 **It errs low, on purpose.** A too-light first set costs one set; a
 too-heavy one on an unfamiliar movement costs a failed rep, which is where
 people get hurt. **It refuses when it can't tell** — a confident wrong
@@ -1896,8 +1987,18 @@ The heuristic stays as the floor, since the AI path is unavailable more
 often than it's available (no API key, offline, a mid-session swap, a
 hand-added exercise, a model returning nonsense).
 
+**Per hand is spelled out.** Anchors for `perSide` lifts are labelled "per
+hand (one dumbbell — the real load is double)", targets that are `perSide`
+are marked `[per hand]`, and the prompt says to answer those with ONE
+dumbbell's weight and everything else with the total. It used to say only
+"match how their existing dumbbell entries are expressed", with no way for
+the model to tell which convention any entry used.
+
 **Guard rails**, because model output is untrusted:
-- an estimate above **1.25× the heaviest set ever logged** is dropped;
+- an estimate above **1.25× the heaviest set ever logged** is dropped —
+  compared in real load on both sides, so a per-hand anchor isn't read at
+  half its size and a per-hand estimate isn't let through at double the
+  intended ceiling;
 - a negative weight on a non-assisted lift is dropped; assisted work must be
   negative and within a bodyweight-scaled bound;
 - failures are **rejected, never clamped**, and the status log names each
@@ -2014,6 +2115,26 @@ silently clear it alongside cache data.
   the in-memory id counter past every restored id.
 - **`applyRestore()`** is split out from the click handler so it is
   directly testable.
+- **Restore is all-or-nothing.** On IndexedDB the clear-and-rewrite of all
+  five stores is ONE transaction (`idbReplaceAll()`, 02-storage.js), so a
+  failure partway — a record IndexedDB rejects, the app being closed
+  mid-restore — rolls back to exactly what was there before. It used to be a
+  separate transaction per store and per record, clearing everything first:
+  a failed write left the device with its own data gone and only part of
+  the backup in its place (the real-browser suite reproduced plans dropping
+  from 2 to 0). A synchronous throw from `put()` aborts the transaction
+  explicitly, since the clears already queued would otherwise auto-commit.
+  The in-memory fallback can't fail halfway and keeps its plain sequence.
+- **Settings are replaced, not merged.** A setting the backup doesn't carry
+  is removed — the old merge let, for instance, an `activePlanId` from the
+  device's previous data survive and point at a plan id that now named a
+  different plan. The device-only keys in `BACKUP_EXCLUDED_SETTINGS` (API
+  key, Dropbox token, `lastBackupAt`) are carried over from the device
+  instead, since they were never in the file. `replaceSettingsLocally()`
+  brings the settings cache and the localStorage mirror into line too —
+  every mirrored key not in the new set is removed, or `loadSettings()` would
+  resurrect it from the mirror on the next launch. The Log tab's day pick is
+  reset, as the plans are a different set now.
 - **Delete All Workout History** (`clearWorkoutHistory()`, same file) sits in
   the same form, below restore. It clears only the `workouts` store — the
   exercise catalog, prefs, plans and settings survive — downloads a backup
@@ -2169,11 +2290,44 @@ additionally disables itself for the write — the lock makes a double-tap
 ### Set timestamps are unique
 
 `logSet()` forces `ts` strictly greater than every other set logged that
-day, scoped to the whole workout. Three things treat `ts` as identity or
+day, scoped to the whole workout. Several things treat `ts` as identity or
 order: `suggestForExercise()` sorts a session's sets by it,
-`collectPaceSamples()` measures the gaps between them, and the RIR prompt
-uses it (via `setSetRir()`) to find the set it asked about regardless of
-any deletion that happened in between.
+`collectPaceSamples()` measures the gaps between them, the RIR prompt uses
+it (via `setSetRir()`) to find the set it asked about regardless of any
+deletion that happened in between, and delete and inline edit address a set
+by it (`setIndexFor()`, see "A set is addressed by its timestamp" under Set
+logging UX).
+
+### Writes settle on the transaction
+
+`idbAdd()`/`idbPut()`/`idbDelete()`/`clearStore()` all go through
+`idbWrite()`, which resolves on the transaction's `complete` event and
+rejects on `abort`. They used to resolve on the request's `success`, which
+only means the operation was queued without error — the transaction can
+still abort afterwards (a full device's QuotaExceededError surfaces exactly
+there), and a set was then reported as saved when it never reached disk.
+
+`addRecord()`/`putRecord()` also **stamp the generated id back onto the
+caller's object** (`stampId()`, for the auto-increment stores). IndexedDB
+generates the key on its own structured clone and never touches the object
+passed in, while the in-memory fallback — and therefore every vm-sandbox
+test — did set `record.id`. Code reading `.id` off an object it had just
+saved therefore saw `undefined` on a real device: `generatePlanWithAI()`
+stored `activePlanId: undefined`, and `logSet()` returned a new day's record
+with no id, so answering the RIR prompt for a day's first set (a drop/myo
+set, or a one-set exercise) threw a DataError and lost the answer.
+`tests/browser.mjs` checks this against real IndexedDB.
+
+### Undo restores the plan link
+
+Deleting a day's only set deletes the whole `workouts` record, and the
+`removed` set carries what Undo needs to recreate it: the session-start
+stamp (`__deletedStartedAt`/`__deletedStartedAuto`) and the day's plan link
+(`__deletedPlanMeta`: `planId`/`dayIndex`/`dayName`), applied only when the
+record has to be recreated. Without the plan link the recreated day had
+`planId: null`, so it stopped counting as trained against the plan — the
+Log tab's rotation offered the same day again, and the next generation could
+prune a plan that had actually been used.
 
 ### The workouts store is read once per interaction
 
@@ -3065,4 +3219,15 @@ to survive a reload for the feature to be worth having; `getDropboxAccessToken()
 still re-derives a short-lived access token from it on every call rather than
 persisting one, and forgets the refresh token outright the moment Dropbox
 rejects it (revoked, expired, or permissions changed) rather than retrying
-the same failure forever.
+the same failure forever. "Rejects" means HTTP 400/401 or `invalid_grant`
+only — a 5xx or a rate limit says nothing about the token, and forgetting it
+on one used to turn a passing Dropbox hiccup into a forced reconnect; those
+now report "try again in a moment" and keep the connection.
+
+**Hidden until an App key is configured.** The shipped `DROPBOX_CLIENT_ID`
+is still the `REPLACE_WITH_YOUR_DROPBOX_APP_KEY` placeholder, and with it the
+"Connect Dropbox…" button used to be live anyway — tapping it left the app
+for a Dropbox error page about an invalid client_id. `DROPBOX_CONFIGURED`
+keeps the button (and Disconnect) hidden until a real key is pasted in. The
+"Connected" status line is owned by `renderDropboxStatus()` and removed again
+on disconnect; it used to stay up beside a "Connect Dropbox…" button.

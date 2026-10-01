@@ -1176,9 +1176,15 @@
     if (!res.ok || !json || !json.access_token) {
       // A refresh token can genuinely stop working — revoked from Dropbox's
       // own security settings, or this app's permissions changed. Forgetting
-      // it here, rather than retrying forever, is what lets Settings notice
+      // it then, rather than retrying forever, is what lets Settings notice
       // and offer to reconnect instead of failing the same way on every
       // future backup.
+      //
+      // But ONLY then. A 5xx or a rate limit says nothing about the token,
+      // and forgetting it on one turned a passing Dropbox hiccup into a
+      // forced reconnect.
+      const revoked = res.status === 400 || res.status === 401 || (json && json.error === 'invalid_grant');
+      if (!revoked) throw new Error(`Dropbox didn’t respond properly (${res.status || 'no status'}) — try again in a moment.`);
       await setSetting('dropboxRefreshToken', null);
       dropboxAccessToken = null;
       throw new Error('Dropbox needs to be reconnected.');
@@ -1224,17 +1230,29 @@
     }
   }
 
+  // The button stays hidden until DROPBOX_CLIENT_ID is a real App key. With
+  // the placeholder it was live anyway, and tapping it left the app for a
+  // Dropbox error page about an invalid client_id.
+  const DROPBOX_CONFIGURED = !/^REPLACE_/.test(DROPBOX_CLIENT_ID);
+  const DROPBOX_CONNECTED_MSG = 'Connected — backups go to the SplitCraft app folder in your Dropbox.';
+
   async function renderDropboxStatus() {
     const btn = document.getElementById('backup-dropbox-btn');
     const disconnectBtn = document.getElementById('dropbox-disconnect-btn');
     const status = document.getElementById('dropbox-status');
     const connected = !!(await getSetting('dropboxRefreshToken', null));
-    if (btn) btn.textContent = connected ? 'Back Up to Dropbox' : 'Connect Dropbox…';
-    if (disconnectBtn) disconnectBtn.style.display = connected ? '' : 'none';
-    if (status && !status.textContent) {
-      status.textContent = connected
-        ? 'Connected — backups go to the SplitCraft app folder in your Dropbox.'
-        : '';
+    if (btn) {
+      btn.textContent = connected ? 'Back Up to Dropbox' : 'Connect Dropbox…';
+      btn.style.display = DROPBOX_CONFIGURED ? '' : 'none';
+    }
+    if (disconnectBtn) disconnectBtn.style.display = DROPBOX_CONFIGURED && connected ? '' : 'none';
+    // Error text from a failed connection is left alone (it's the one thing
+    // worth reading), but the "Connected" line is this function's own, so it
+    // has to come off again on disconnect — it used to stay up beside a
+    // "Connect Dropbox…" button.
+    if (status) {
+      if (connected) status.textContent = DROPBOX_CONNECTED_MSG;
+      else if (status.textContent === DROPBOX_CONNECTED_MSG) status.textContent = '';
     }
   }
 
@@ -1392,23 +1410,47 @@
   // workouts, so preserving ids keeps every cross-reference intact for free.
   // Merging two devices would mean remapping every id in both directions — a
   // different and much more dangerous feature.
+  //
+  // ALL OR NOTHING. On IndexedDB the whole replacement is one transaction
+  // (idbReplaceAll()), so a failure partway — or the app being closed
+  // mid-restore — rolls back to exactly what was there before instead of
+  // leaving your data cleared and the backup half-written.
+  //
+  // Settings are REPLACED, not merged, which is what "Replace all data"
+  // promises. Merging let a setting the backup didn't carry survive from the
+  // device's old data — an activePlanId pointing at a plan id that, after the
+  // restore, belonged to a different plan. The device-only keys in
+  // BACKUP_EXCLUDED_SETTINGS (API key, Dropbox token, lastBackupAt) are the
+  // exception: they were never in the file, so they're carried over from the
+  // device rather than wiped.
   async function applyRestore(d) {
-    await clearStore('workouts');
-    await clearStore('exercises');
-    await clearStore('exercisePrefs');
-    await clearStore('plans');
-    // restorePut, not putRecord — see restorePut() for why that difference is
-    // load-bearing. Exercises first, so the rows that plans and workouts point
-    // at exist before the things pointing at them.
-    for (const rec of d.exercises) await restorePut('exercises', rec);
-    for (const rec of d.workouts) await restorePut('workouts', rec);
-    for (const rec of d.plans) await restorePut('plans', rec);
-    for (const rec of (d.exercisePrefs || [])) {
-      if (rec && rec.exerciseId != null) await setExercisePref(rec.exerciseId, rec);
-    }
+    const settings = {};
     for (const [key, value] of Object.entries(d.settings || {})) {
-      if (!BACKUP_EXCLUDED_SETTINGS.includes(key)) await setSetting(key, value);
+      if (!BACKUP_EXCLUDED_SETTINGS.includes(key)) settings[key] = value;
     }
+    for (const key of BACKUP_EXCLUDED_SETTINGS) {
+      if (settingsCache.has(key)) settings[key] = settingsCache.get(key);
+    }
+    const prefs = (d.exercisePrefs || [])
+      .filter(rec => rec && rec.exerciseId != null)
+      .map(rec => ({ pinned: false, liked: false, disliked: false, ...rec }));
+
+    if (dbAvailable) {
+      await idbReplaceAll({
+        exercises: d.exercises, workouts: d.workouts, plans: d.plans, exercisePrefs: prefs,
+        settings: Object.entries(settings).map(([key, value]) => ({ key, value })),
+      });
+    } else {
+      // In-memory: nothing here can fail halfway. restorePut, not putRecord —
+      // see restorePut() for why that difference is load-bearing.
+      for (const store of ['workouts', 'exercises', 'exercisePrefs', 'plans']) await clearStore(store);
+      for (const rec of d.exercises) await restorePut('exercises', rec);
+      for (const rec of d.workouts) await restorePut('workouts', rec);
+      for (const rec of d.plans) await restorePut('plans', rec);
+      memory.exercisePrefs = prefs;
+      memory.settings = { ...settings };
+    }
+    replaceSettingsLocally(settings);
     invalidateWorkoutsCache();
     invalidateExercisePicker();
   }
@@ -1513,6 +1555,9 @@
       // come off the outer parsed object while it's still around.
       const restoredExportedAt = pendingRestore.exportedAt;
       await applyRestore(d);
+      // The plans are a different set now — a day index picked against the
+      // old current plan means nothing against the restored one.
+      selectedLogDayIdx = null;
 
       okBox.textContent = `Restored ${d.workouts.length} day(s), ${d.exercises.length} exercises and ${d.plans.length} plan(s). Your API key was left unchanged.`;
       okBox.style.display = 'block';
@@ -1544,7 +1589,9 @@
       }
       toast('Backup restored');
     } catch (err) {
-      errBox.textContent = `Restore failed: ${err.message}. Some data may have been written — reload and check before retrying.`;
+      errBox.textContent = dbAvailable
+        ? `Restore failed: ${err.message}. Nothing was changed — your existing data is still here.`
+        : `Restore failed: ${err.message}. Some data may have been written — reload and check before retrying.`;
       errBox.style.display = 'block';
       reportUnexpected('Backup restore', err);
     } finally {

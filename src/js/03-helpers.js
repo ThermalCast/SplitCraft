@@ -178,16 +178,21 @@
   // =========================================================================
   // Tabs
   // =========================================================================
+  function showTab(tab) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    document.getElementById('panel-' + tab).classList.add('active');
+    // Switching tabs from halfway down a long set list otherwise drops you
+    // into the middle of the new panel.
+    window.scrollTo(0, 0);
+    // History isn't rebuilt while hidden (see historyTabVisible(),
+    // 05-history.js) — catch it up now that it's about to be seen.
+    if (tab === 'history' && historyStale) {
+      return refreshHistoryTab().catch(err => reportUnexpected('History', err));
+    }
+  }
   document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-      btn.classList.add('active');
-      document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
-      // Switching tabs from halfway down a long set list otherwise drops you
-      // into the middle of the new panel.
-      window.scrollTo(0, 0);
-    });
+    btn.addEventListener('click', () => showTab(btn.dataset.tab));
   });
 
   // =========================================================================

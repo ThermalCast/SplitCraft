@@ -316,12 +316,19 @@
       * (ENERGY_MULTIPLIER[modifiers.energy] ?? 1)
       * rirRateMultiplier(modifiers.rir);
     const target = load * pct * scale;
+    // `target` is in REAL load, and so must be the jump it's compared with. A
+    // perSide lift's step is per implement — one 2kg step on each dumbbell
+    // moves the real load by 4kg — and comparing the target against a single
+    // step progressed per-side lifts at up to twice the intended rate. The
+    // returned incrementKg stays in LOGGED units (per side), because that's
+    // what the caller adds it to.
+    const realStep = exercise && exercise.perSide ? step * 2 : step;
 
-    if (target >= step) {
-      return { incrementKg: Math.round(target / step) * step, sessionsRequired: baseSessions };
+    if (target >= realStep) {
+      return { incrementKg: Math.round(target / realStep) * step, sessionsRequired: baseSessions };
     }
     // target of 0 (bodyweight-only work logged at 0) would divide to Infinity.
-    const spread = target > 0 ? Math.ceil(step / target) : baseSessions;
+    const spread = target > 0 ? Math.ceil(realStep / target) : baseSessions;
     // Cap it: past about six clean sessions at one weight the prescription
     // people actually need is a different exercise or a deload, not a longer
     // wait, and an uncapped number reads as broken.
@@ -361,13 +368,13 @@
   // ageRateMultiplier() — a defensible shape, NOT numbers from a study, and
   // they only ever seed a first guess the user is about to overwrite.
   //
-  // Dumbbells carry a real ambiguity worth naming: the Fitbod importer stores
-  // them as TOTAL load (it multiplies by the export's `multiplier` of 2.0),
-  // while someone typing a dumbbell press by hand almost certainly enters the
-  // per-hand number. Both shapes exist in the same store and nothing
-  // distinguishes them. That ambiguity cancels out entirely within the
-  // same-equipment tier — per-hand history seeds a per-hand estimate — which
-  // is the main reason the cross-equipment tiers below are deliberately timid.
+  // Dumbbell numbers come in two shapes: a `perSide` exercise stores what's
+  // on ONE dumbbell, everything else stores the total (the Fitbod importer
+  // halves a perSide lift's file total back to one side — see
+  // 06-catalog-import-backup.js). estimateStartingWeight() compares them all
+  // as totals and converts back to per-side for a perSide target, so a
+  // per-hand history and a combined one can seed each other without one
+  // reading as twice (or half) the other.
   const EQUIP_LOAD_RATIO = {
     barbell: 1, machine: 0.9, cable: 0.5, dumbbell: 0.45, other: 0.7
   };
@@ -491,7 +498,9 @@
       if (!rec) continue;
       const rEquip = exerciseEquipment(rec);
       rows.push({
-        rec, weight: r.weight, equip: rEquip,
+        // As a TOTAL, so per-side and combined histories compare like for
+        // like (see EQUIP_LOAD_RATIO's comment). Converted back below.
+        rec, weight: rec.perSide ? r.weight * 2 : r.weight, equip: rEquip,
         muscle: rec.primaryMuscle,
         region: (musclesById[rec.primaryMuscle] || {}).region
       });
@@ -571,7 +580,9 @@
       return null;
     }
 
-    const raw = median(values) * haircut;
+    // Back from a total to how THIS exercise is logged: one dumbbell's worth
+    // for a perSide lift.
+    const raw = median(values) * haircut * (exercise.perSide ? 0.5 : 1);
     if (!isFinite(raw) || raw <= 0) return null;
     const rounded = Math.max(step, Math.round(raw / step) * step);
     return {
