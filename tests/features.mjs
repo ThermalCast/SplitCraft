@@ -1718,9 +1718,16 @@ check('clearSetting removes it from the cache',
   await app.deleteRecord('workouts', inclineWorkoutId);
   await app.putRecord('exercises', { ...(await app.getRecord('exercises', inclinePress.id)), perSide: true });
 
+  // One-arm work is per side too: the logged number is one dumbbell and both
+  // arms do the work — Fitbod logs Dumbbell Row with multiplier 2.0. (It was
+  // once deliberately left off; per-side no longer changes the progression
+  // RATE — see progressionPlan()'s realStep — only volume and the chart.)
   const dbRow = find('Dumbbell Row');
-  check('the deliberately-uncurated Dumbbell Row is NOT marked perSide',
-    !(await app.getRecord('exercises', dbRow.id)).perSide);
+  check('one-arm Dumbbell Row is curated perSide (Fitbod logs it per side)',
+    (await app.getRecord('exercises', dbRow.id)).perSide === true);
+  const lateral = find('Lateral Raise');
+  check('dumbbell raises are curated perSide (Lateral Raise)',
+    (await app.getRecord('exercises', lateral.id)).perSide === true);
 
   // A hand-toggled perSide must survive the sync exactly like a hand-edited
   // muscle/equipment already does.
@@ -2669,6 +2676,37 @@ check('clearSetting removes it from the cache',
   await app.deleteRecord('exercises', plainExId);
 }
 
+// A NEW exercise the import creates takes its perSide flag from Fitbod's own
+// multiplier: 2.0 means one dumbbell / one side, both sides working. Created
+// without it, every dumbbell exercise in an export came in as "combined", and
+// turning the flag on later doubled its whole imported history.
+{
+  const csv = [
+    'Date,Exercise,Reps,Weight(kg),isWarmup,multiplier',
+    '2026-01-02T10:00:00+0000,Brand New Dumbbell Thing,10,15,false,2',
+    '2026-01-02T10:00:00+0000,Brand New Machine Thing,10,50,false,1',
+  ].join('\n');
+  await listeners.get('import-file').change({ target: { files: [{ text: async () => csv }] } });
+  await listeners.get('import-confirm-btn').click();
+  const all = await app.getAllRecords('exercises');
+  const dual = all.find(e => e.name === 'Brand New Dumbbell Thing');
+  const single = all.find(e => e.name === 'Brand New Machine Thing');
+  const day = await app.getWorkoutForDate('2026-01-02');
+  const weightOf = (ex) => day.exercises.find(e => e.exerciseId === ex.id).sets[0].entries[0].weight;
+  check('an exercise the import creates from multiplier-2.0 rows is marked perSide',
+    !!dual && dual.perSide === true, JSON.stringify(dual));
+  check('...and stores one side\'s weight (the file\'s raw 15kg, not the 30kg total)',
+    weightOf(dual) === 15, String(weightOf(dual)));
+  check('an exercise created from multiplier-1.0 rows is not perSide and stores the total',
+    !!single && !single.perSide && weightOf(single) === 50, JSON.stringify({ perSide: single && single.perSide, w: weightOf(single) }));
+  check('the import summary says how many it marked per side',
+    /1 of them marked per side/.test(app.document.getElementById('import-success').textContent),
+    app.document.getElementById('import-success').textContent);
+  await app.clearWorkoutHistory();
+  await app.deleteRecord('exercises', dual.id);
+  await app.deleteRecord('exercises', single.id);
+}
+
 // ---------------------------------------------------------------------------
 // fillInMissingEquipmentSteps() (08-progression.js) — a never-explicitly-
 // saved equipment class was silently stuck at its raw kg default (2.5kg
@@ -2745,6 +2783,101 @@ check('clearSetting removes it from the cache',
 
   await app.setSetting('equipmentStepsKg', knownDefaults);
   await app.loadSettingsIntoForm(); // leave state clean for anything after this
+}
+
+// ---------------------------------------------------------------------------
+// The per-side history review (13-per-side-review.js): finds per-side
+// exercises whose history is still the combined weight of both sides, and —
+// once asked — halves exactly those sets and flags the exercise.
+// ---------------------------------------------------------------------------
+{
+  await app.clearWorkoutHistory();
+  const mkEx = async (name, extra = {}) => {
+    const id = await app.addRecord('exercises', { name, primaryMuscle: 'chest', secondaryMuscles: [], equipment: 'dumbbell', custom: true, ...extra });
+    return app.getRecord('exercises', id);
+  };
+  const press = await mkEx('Review Flagged Press', { perSide: true });       // flagged, imported totals left combined
+  const curl = await mkEx('Review Dumbbell Curl');                           // unflagged dumbbell, imported + app
+  const thrust = await mkEx('Review Dumbbell Hip Thrust');                   // one implement: never per side
+  const appOnly = await mkEx('Review Arnold-ish Press');                     // unflagged, app sets only
+  const clean = await mkEx('Review Clean Press', { perSide: true });         // flagged, all per side already
+  // Imported days: whole-second timestamps, no session stamp. App days:
+  // millisecond timestamps and startedAt — the two things that tell them apart.
+  const imported = (date, sets) => ({ date, ts: Date.parse(date + 'T10:00:00'), planId: null, dayIndex: null, dayName: null,
+    exercises: sets.map(([ex, kg], i) => ({ exerciseId: ex.id, sets: [{ ts: Date.parse(date + 'T10:00:00') + i * 1000, type: 'standard', entries: [{ weight: kg, reps: 10 }] }] })) });
+  const inApp = (date, sets) => ({ date, ts: Date.parse(date + 'T18:00:00') + 123, startedAt: Date.parse(date + 'T18:00:00') + 123, startedAuto: true, planId: null, dayIndex: null, dayName: null,
+    exercises: sets.map(([ex, kg], i) => ({ exerciseId: ex.id, sets: [{ ts: Date.parse(date + 'T18:00:00') + 123 + i * 60007, type: 'standard', entries: [{ weight: kg, reps: 10 }] }] })) });
+  const days = [
+    imported('2026-02-01', [[press, 60], [curl, 24], [thrust, 30]]),
+    inApp('2026-02-08', [[press, 30], [curl, 25], [appOnly, 14], [clean, 12]]),     // press per side; curl COMBINED (25 ≈ 2 × 12)
+    inApp('2026-02-15', [[curl, 12.5], [appOnly, 14], [press, 41]]),                 // curl per side; press 41 vs 30 = unclear
+  ];
+  const ids = [];
+  for (const d of days) ids.push(await app.addRecord('workouts', d));
+  app.invalidateWorkoutsCache();
+
+  const rows = app.analyzePerSideHistory(await app.getAllRecords('exercises'), await app.getAllWorkouts());
+  const rowOf = (ex) => rows.find(r => r.exerciseId === ex.id);
+  check('a flagged exercise with imported combined sets is listed, its imported set to be halved',
+    rowOf(press) && rowOf(press).flagged && rowOf(press).split.length === 1 && rowOf(press).unclear === 1,
+    JSON.stringify(rowOf(press)));
+  check('an unflagged dumbbell exercise is listed: imported total + an app set at ~2x the reference are split, the per-side one kept',
+    rowOf(curl) && !rowOf(curl).flagged && rowOf(curl).split.length === 2 && rowOf(curl).ask.length === 0,
+    JSON.stringify(rowOf(curl)));
+  check('a one-implement exercise (hip thrust) is never offered', !rowOf(thrust));
+  check('an unflagged exercise with only app sets asks how they were entered',
+    rowOf(appOnly) && rowOf(appOnly).split.length === 0 && rowOf(appOnly).ask.length === 2, JSON.stringify(rowOf(appOnly)));
+  check('a flagged exercise whose history is already all per side is not listed', !rowOf(clean));
+
+  // Apply: press + curl checked, the app-only one checked as "both combined",
+  // nothing else touched.
+  const result = await app.applyPerSideReview(rows, {
+    [press.id]: { checked: true }, [curl.id]: { checked: true }, [appOnly.id]: { checked: true, how: 'combined' },
+  });
+  const weightsOf = async (ex) => (await app.getAllWorkouts())
+    .flatMap(w => w.exercises.filter(e => e.exerciseId === ex.id).flatMap(e => e.sets.map(s => s.entries[0].weight)))
+    .sort((a, b) => a - b);
+  check('applying halves exactly the sets judged combined',
+    JSON.stringify(await weightsOf(press)) === JSON.stringify([30, 30, 41])
+    && JSON.stringify(await weightsOf(curl)) === JSON.stringify([12, 12.5, 12.5])
+    && JSON.stringify(await weightsOf(appOnly)) === JSON.stringify([7, 7]),
+    JSON.stringify({ press: await weightsOf(press), curl: await weightsOf(curl), appOnly: await weightsOf(appOnly) }));
+  check('...flags the exercises it split, and leaves the rest alone',
+    (await app.getRecord('exercises', curl.id)).perSide === true && (await app.getRecord('exercises', appOnly.id)).perSide === true
+    && !(await app.getRecord('exercises', thrust.id)).perSide
+    && JSON.stringify(await weightsOf(thrust)) === JSON.stringify([30]));
+  check('...and reports what it did', result.sets === 5 && result.exercises === 3, JSON.stringify(result));
+  check('a second look finds nothing left to fix for those exercises',
+    !app.analyzePerSideHistory(await app.getAllRecords('exercises'), await app.getAllWorkouts())
+      .some(r => [press.id, curl.id, appOnly.id].includes(r.exerciseId)));
+
+  // An imported set the importer already stored per side is never halved again.
+  const tagged = await mkEx('Review Tagged Import', { perSide: true });
+  const taggedDay = imported('2026-03-01', [[tagged, 20]]);
+  taggedDay.exercises[0].sets[0].splitPerSide = true;
+  await app.addRecord('workouts', taggedDay);
+  app.invalidateWorkoutsCache();
+  check('an imported set marked splitPerSide is not offered for halving',
+    !app.analyzePerSideHistory(await app.getAllRecords('exercises'), await app.getAllWorkouts()).some(r => r.exerciseId === tagged.id));
+
+  // The one-time trigger: shows when there's something to fix, records that it
+  // ran when closed, and doesn't come back.
+  const fresh = await mkEx('Review Trigger Curl');
+  await app.addRecord('workouts', imported('2026-03-02', [[fresh, 20]]));
+  app.invalidateWorkoutsCache();
+  await app.clearSetting('perSideReviewVersion');
+  const modal = app.document.getElementById('perside-modal');
+  modal.hidden = true;
+  const shown = await app.maybeRunPerSideReview();
+  check('on the first launch after the update, the review opens when there is something to split',
+    shown === true && modal.hidden === false
+    && app.document.getElementById('perside-list').innerHTML.includes('Review Trigger Curl'));
+  await app.closePerSideReview();
+  check('closing it records that it ran, and it doesn\'t open again by itself',
+    (await app.getSetting('perSideReviewVersion', 0)) >= 1 && (await app.maybeRunPerSideReview()) === false);
+
+  await app.clearWorkoutHistory();
+  for (const ex of [press, curl, thrust, appOnly, clean, tagged, fresh]) await app.deleteRecord('exercises', ex.id);
 }
 
 // After Complete, the session button RESUMES (the original startedAt is kept,

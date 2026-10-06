@@ -869,6 +869,23 @@
 
   .dropmyo-modal-body { padding: 13px 15px calc(15px + env(safe-area-inset-bottom, 0px)); }
 
+  /* Per-side review: a scrolling list of exercises, one checkbox each, with
+     the backup box and the buttons pinned below it so Split is always in
+     reach however long the list is. */
+  .perside-body { padding: 13px 15px 6px; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+  .perside-footer {
+    flex: 0 0 auto; padding: 8px 15px calc(12px + env(safe-area-inset-bottom, 0px));
+    border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+  }
+  .perside-footer .switch-row { flex: 1 1 100%; min-height: 36px; }
+  .perside-footer button.primary-btn { flex: 1 1 auto; width: auto; margin-top: 0; }
+  .perside-footer button.ghost { margin-top: 0; }
+  .perside-row { padding: 9px 0; border-bottom: 1px solid var(--border); }
+  .perside-row .hint { margin: 2px 0 0 30px; }
+  .perside-ask { margin: 6px 0 0 30px; font-size: 12.5px; color: var(--text-dim); display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; }
+  .perside-ask label { display: inline-flex; align-items: center; gap: 6px; margin: 0; font-size: 12.5px; font-weight: 600; color: var(--text); text-transform: none; letter-spacing: 0; }
+  .perside-ask input { accent-color: var(--accent); }
+
   /* ===== New-week plan prompt =====
      Accent-bordered rather than another neutral card: it is the one thing on
      the tab asking for a decision, and it appears at most once a week. */
@@ -1648,6 +1665,9 @@
       <input type="search" id="exercise-filter" placeholder="Search exercises…" autocomplete="off">
     </div>
     <div class="hint" id="exercise-count-hint" style="margin-top:0;"></div>
+    <!-- Re-opens the per-side review (13-per-side-review.js) that runs once by
+         itself after the update that introduced it. -->
+    <button type="button" class="link-btn" id="perside-review-btn">Check per-side history…</button>
 
     <details class="disclosure">
       <summary>Add an exercise</summary>
@@ -1738,6 +1758,31 @@
         <div id="dropmyo-rows-container" class="entry-rows"></div>
         <button type="button" class="add-row" id="dropmyo-add-row-btn">+ Add</button>
         <button type="button" class="add" id="dropmyo-log-btn">Log</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Per-side history review (13-per-side-review.js): which per-side
+       exercises still have history stored as the combined weight of both
+       sides, one checkbox each. Shown by itself once after the update that
+       introduced it, and from the Exercises tab on demand. -->
+  <div class="prompt-modal" id="perside-modal" hidden>
+    <div class="prompt-modal-card">
+      <div class="prompt-modal-header">
+        <h3>Per-side weights</h3>
+        <button type="button" class="prompt-modal-close" id="perside-close" aria-label="Close">×</button>
+      </div>
+      <div class="perside-body">
+        <div class="hint" style="margin-top:0;">These exercises are logged one dumbbell (or one side) at a time, but some of their history is stored as the combined weight of both. Splitting halves those sets so every number means one side — the real load the app works from stays exactly the same.</div>
+        <div id="perside-list"></div>
+      </div>
+      <div class="perside-footer">
+        <label class="switch-row" for="perside-backup-first">
+          <input type="checkbox" id="perside-backup-first" checked>
+          <span>Download a backup first</span>
+        </label>
+        <button type="button" class="primary-btn" id="perside-apply">Split checked exercises</button>
+        <button type="button" class="ghost" id="perside-skip">Not now</button>
       </div>
     </div>
   </div>
@@ -1866,16 +1911,15 @@
     { id: 'other', name: 'Other / free', defaultStepKg: 2.5 }
   ];
 
-  // `perSide: true` marks an exercise as genuinely two implements moving
-  // together (both dumbbells pressed/curled/shrugged at once) — see
-  // "Per-side weight" in design-summary.md. Curated by hand per entry here,
-  // the same way primaryMuscle/secondaryMuscles are, rather than guessed
-  // from the name: "dumbbell" alone doesn't say it (Goblet Squat is one
-  // implement; Dumbbell Row is conventionally one arm at a time), and a
-  // confidently wrong guess would silently double someone's real progression
-  // numbers. Absent (the default) means "log the true total load," today's
-  // unchanged behavior — only entries below that are unambiguously bilateral
-  // get it.
+  // `perSide: true` marks an exercise whose logged weight is ONE side's —
+  // one dumbbell, one cable, one arm's horn — while both sides do the work,
+  // together (a dumbbell press) or one after the other (a one-arm row). Same
+  // convention as Fitbod's `multiplier: 2.0`. See "Per-side weight" in
+  // design-summary.md. Curated by hand per entry here, the same way
+  // primaryMuscle/secondaryMuscles are, rather than guessed from the name:
+  // "dumbbell" alone doesn't say it (Goblet Squat and a dumbbell hip thrust
+  // are ONE implement, logged as the total). Absent (the default) means "log
+  // the true total load".
   const DEFAULT_EXERCISES = [
     // ---- Chest ----
     { name: 'Barbell Bench Press', primaryMuscle: 'chest', secondaryMuscles: ['triceps', 'front_delts'] },
@@ -1894,20 +1938,20 @@
     { name: 'Overhead Press', primaryMuscle: 'front_delts', secondaryMuscles: ['triceps'] },
     { name: 'Dumbbell Shoulder Press', primaryMuscle: 'front_delts', secondaryMuscles: ['triceps'], perSide: true },
     { name: 'Machine Shoulder Press', primaryMuscle: 'front_delts', secondaryMuscles: ['triceps'] },
-    { name: 'Arnold Press', primaryMuscle: 'front_delts', secondaryMuscles: ['side_delts', 'triceps'] },
-    { name: 'Front Raise', primaryMuscle: 'front_delts', secondaryMuscles: [] },
+    { name: 'Arnold Press', primaryMuscle: 'front_delts', secondaryMuscles: ['side_delts', 'triceps'], perSide: true },
+    { name: 'Front Raise', primaryMuscle: 'front_delts', secondaryMuscles: [], perSide: true },
 
     // ---- Side delts ----
-    { name: 'Lateral Raise', primaryMuscle: 'side_delts', secondaryMuscles: [] },
-    { name: 'Cable Lateral Raise', primaryMuscle: 'side_delts', secondaryMuscles: [] },
+    { name: 'Lateral Raise', primaryMuscle: 'side_delts', secondaryMuscles: [], perSide: true },
+    { name: 'Cable Lateral Raise', primaryMuscle: 'side_delts', secondaryMuscles: [], perSide: true },
     { name: 'Machine Lateral Raise', primaryMuscle: 'side_delts', secondaryMuscles: [] },
     { name: 'Upright Row', primaryMuscle: 'side_delts', secondaryMuscles: ['upper_back'] },
 
     // ---- Rear delts ----
     { name: 'Face Pull', primaryMuscle: 'rear_delts', secondaryMuscles: ['upper_back'] },
     { name: 'Reverse Pec Deck', primaryMuscle: 'rear_delts', secondaryMuscles: ['upper_back'] },
-    { name: 'Rear Delt Fly', primaryMuscle: 'rear_delts', secondaryMuscles: ['upper_back'] },
-    { name: 'Bent-Over Reverse Fly', primaryMuscle: 'rear_delts', secondaryMuscles: ['upper_back'] },
+    { name: 'Rear Delt Fly', primaryMuscle: 'rear_delts', secondaryMuscles: ['upper_back'], perSide: true },
+    { name: 'Bent-Over Reverse Fly', primaryMuscle: 'rear_delts', secondaryMuscles: ['upper_back'], perSide: true },
 
     // ---- Triceps ----
     { name: 'Triceps Pushdown', primaryMuscle: 'triceps', secondaryMuscles: [] },
@@ -1915,7 +1959,7 @@
     { name: 'Overhead Triceps Extension', primaryMuscle: 'triceps', secondaryMuscles: [] },
     { name: 'Close-Grip Bench Press', primaryMuscle: 'triceps', secondaryMuscles: ['chest', 'front_delts'] },
     { name: 'Bench Dip', primaryMuscle: 'triceps', secondaryMuscles: ['chest'] },
-    { name: 'Triceps Kickback', primaryMuscle: 'triceps', secondaryMuscles: [] },
+    { name: 'Triceps Kickback', primaryMuscle: 'triceps', secondaryMuscles: [], perSide: true },
 
     // ---- Lats ----
     { name: 'Pull-Up', primaryMuscle: 'lats', secondaryMuscles: ['biceps'] },
@@ -1923,7 +1967,7 @@
     { name: 'Chin-Up', primaryMuscle: 'lats', secondaryMuscles: ['biceps'] },
     { name: 'Lat Pulldown', primaryMuscle: 'lats', secondaryMuscles: ['biceps'] },
     { name: 'Barbell Row', primaryMuscle: 'lats', secondaryMuscles: ['biceps', 'upper_back'] },
-    { name: 'Dumbbell Row', primaryMuscle: 'lats', secondaryMuscles: ['biceps', 'upper_back'] },
+    { name: 'Dumbbell Row', primaryMuscle: 'lats', secondaryMuscles: ['biceps', 'upper_back'], perSide: true },
     { name: 'T-Bar Row', primaryMuscle: 'lats', secondaryMuscles: ['upper_back', 'biceps'] },
     { name: 'Machine Row', primaryMuscle: 'lats', secondaryMuscles: ['upper_back', 'biceps'] },
     { name: 'Inverted Row', primaryMuscle: 'lats', secondaryMuscles: ['upper_back', 'biceps'] },
@@ -2015,7 +2059,7 @@
   //   workouts      — one record per calendar day trained. { date, ts,
   //                   planId, dayIndex, dayName, exercises: [{ exerciseId,
   //                   sets: [{ts, type:'standard'|'drop'|'myo', entries:
-  //                   [{weight,reps}, ...]}] }], targetOverrides: {exerciseId:
+  //                   [{weight,reps}, ...], rir?, splitPerSide?}] }], targetOverrides: {exerciseId:
   //                   number} }. `weight` is always kilograms — sets no
   //                   longer carry their own unit (removed in the v5
   //                   migration); the app has exactly one global display
@@ -2346,6 +2390,33 @@
       memory.nextId[store] = Math.max(memory.nextId[store], (Number(record.id) || 0) + 1);
     }
     return record.id;
+  }
+
+  // Several existing records across one or more stores, written in ONE
+  // transaction on IndexedDB: a bulk correction (the per-side review, which
+  // rewrites history and flips exercise flags together) must land whole or
+  // not at all — half-halved history next to a flag that says "per side"
+  // would be exactly the inconsistency it exists to fix. Same explicit abort
+  // on a synchronous put() throw as idbReplaceAll().
+  async function putRecordsAtomically(byStore) {
+    const stores = Object.keys(byStore).filter(s => byStore[s] && byStore[s].length);
+    if (!stores.length) return;
+    if (stores.includes('workouts')) invalidateWorkoutsCache();
+    if (!dbAvailable) {
+      for (const store of stores) for (const rec of byStore[store]) await putRecord(store, rec);
+      return;
+    }
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(stores, 'readwrite');
+      tx.oncomplete = () => resolve();
+      tx.onabort = () => reject(tx.error || new Error('Saving was rolled back — nothing was changed'));
+      try {
+        for (const store of stores) for (const rec of byStore[store]) tx.objectStore(store).put(rec);
+      } catch (e) {
+        try { tx.abort(); } catch (abortErr) { /* already finished */ }
+        reject(e);
+      }
+    });
   }
 
   // Used by restore, which rewrites every store wholesale.
@@ -4838,6 +4909,11 @@
 
     const byDate = new Map(); // localDate -> { ts, setCounter, exercises: Map<nameLower, {name, sets:[{ts,reps,weight}]}> }
     let skippedNoReps = 0, skippedWarmup = 0, skippedBadRow = 0, assistedSets = 0, badMultiplierSets = 0;
+    // nameKey()s Fitbod itself logs per side (`multiplier: 2.0` on any row):
+    // one dumbbell / one cable / one side, with both sides doing the work.
+    // That's exactly what `perSide` means, so it's ground truth for a new
+    // exercise's flag rather than a guess from its name.
+    const perSideKeys = new Set();
     // Only Date/Exercise/Reps/Weight(kg) are required (see the docs above and
     // the format-guard a few lines up); isWarmup and multiplier are optional
     // trailing columns that already degrade safely to defaults when read
@@ -4871,6 +4947,7 @@
       // skip/warning category so it surfaces there instead.
       if (col.multiplier >= 0 && isNaN(rawMultiplier)) badMultiplierSets++;
       const multiplier = isNaN(rawMultiplier) ? 1 : rawMultiplier;
+      if (multiplier === 2) perSideKeys.add(nameKey(name));
       const w = isNaN(weightKg) ? 0 : weightKg;
       // multiplier 0 means "this load isn't on you". Two distinct cases in a
       // real export, cleanly separated by whether Weight(kg) is populated:
@@ -4899,7 +4976,7 @@
       dayEntry.setCounter++;
     }
 
-    return { byDate, skippedNoReps, skippedWarmup, skippedBadRow, assistedSets, badMultiplierSets };
+    return { byDate, skippedNoReps, skippedWarmup, skippedBadRow, assistedSets, badMultiplierSets, perSideKeys };
   }
 
   document.getElementById('import-form').addEventListener('submit', (e) => e.preventDefault());
@@ -4954,7 +5031,7 @@
     try {
       const allExercises = await getAllRecords('exercises');
       const byNameLower = new Map(allExercises.map(e => [nameKey(e.name), e]));
-      let newExerciseCount = 0, unclassifiedCount = 0, importedSets = 0, importedDays = 0;
+      let newExerciseCount = 0, unclassifiedCount = 0, importedSets = 0, importedDays = 0, perSideCreatedCount = 0;
       const replaceMode = document.getElementById('import-mode').value === 'replace';
       const clearedKeys = new Set();
       let replacedSets = 0;
@@ -4972,8 +5049,15 @@
           if (!exRecord) {
             const primaryMuscle = classifyMuscleFromName(exInfo.name);
             if (primaryMuscle === 'unclassified') unclassifiedCount++;
-            const newId = await addRecord('exercises', { name: exInfo.name, primaryMuscle, secondaryMuscles: [], equipment: classifyEquipmentFromName(exInfo.name), custom: true });
-            exRecord = { id: newId, name: exInfo.name, primaryMuscle };
+            // Fitbod's own multiplier decides the flag for an exercise this
+            // import creates (see perSideKeys in parseFitbodCSV()). Created
+            // without it, every dumbbell exercise from an export came in as
+            // "combined", and turning the flag on later silently doubled its
+            // whole imported history.
+            const perSide = !!(pendingImport.perSideKeys && pendingImport.perSideKeys.has(key));
+            if (perSide) perSideCreatedCount++;
+            const newId = await addRecord('exercises', { name: exInfo.name, primaryMuscle, secondaryMuscles: [], equipment: classifyEquipmentFromName(exInfo.name), custom: true, ...(perSide ? { perSide: true } : {}) });
+            exRecord = { id: newId, name: exInfo.name, primaryMuscle, perSide };
             byNameLower.set(key, exRecord);
             newExerciseCount++;
           }
@@ -4999,7 +5083,12 @@
             // both land on the same true total, whether the exercise's
             // history came from hand-entry or this import.
             const storedWeight = exRecord.perSide ? Math.round((s.weight / 2) * 100) / 100 : s.weight;
-            workoutExEntry.sets.push({ ts: s.ts, type: 'standard', entries: [{ weight: storedWeight, reps: s.reps }] });
+            // `splitPerSide` records that this imported set is ALREADY one
+            // side's — the per-side review (13-per-side-review.js) otherwise
+            // reads an imported set as Fitbod's combined total and would
+            // offer to halve it a second time.
+            workoutExEntry.sets.push({ ts: s.ts, type: 'standard', entries: [{ weight: storedWeight, reps: s.reps }],
+              ...(exRecord.perSide ? { splitPerSide: true } : {}) });
             importedSets++;
           });
         }
@@ -5010,7 +5099,8 @@
       successBox.textContent = `Imported ${importedSets} sets across ${importedDays} day(s).` +
         (replacedSets ? ` Replaced ${replacedSets} previously imported set(s).` : '') +
         ` ${newExerciseCount} new exercise(s) created` +
-        (unclassifiedCount ? `, ${unclassifiedCount} of which couldn’t be auto-classified — check the Exercises tab and reassign their muscle group.` : '.');
+        (unclassifiedCount ? `, ${unclassifiedCount} of which couldn’t be auto-classified — check the Exercises tab and reassign their muscle group.` : '.') +
+        (perSideCreatedCount ? ` ${perSideCreatedCount} of them marked per side (Fitbod logs them one dumbbell or one side at a time).` : '');
       successBox.style.display = 'block';
       pendingImport = null;
       document.getElementById('import-preview').style.display = 'none';
@@ -10179,6 +10269,11 @@ Respond with ONLY valid JSON, no markdown, exactly:
     selectedLogDayIdx = null; // fresh load — reset the Log tab's day pick
     await refreshPlanTab();
     await renderExerciseManager();
+    // Once, on the first launch of the version that introduced it: offer to
+    // split per-side history still stored as combined weights (see
+    // 13-per-side-review.js). Not awaited past its own failure — a problem in
+    // the review must never take startup with it.
+    await maybeRunPerSideReview().catch(err => reportUnexpected('Per-side review', err));
 
     // Not awaited: requesting persistent storage (and painting the result in
     // Settings) is a nice-to-have, not something the rest of startup should
@@ -10266,6 +10361,240 @@ Respond with ONLY valid JSON, no markdown, exactly:
       }).catch(() => { /* offline support unavailable — the app is unaffected */ });
     });
   }
+  // 13-per-side-review.js — one-time (and on-demand) review that splits per-side history stored as combined weights
+  // =========================================================================
+  // Per-side history review
+  //
+  // `perSide` means every stored weight is ONE side's (see effectiveLoadKg(),
+  // 08-progression.js), and the app doubles it into the real load. History
+  // written before an exercise carried the flag doesn't follow that: a Fitbod
+  // import stores the combined total of both dumbbells, and so do sets typed
+  // in by following a suggestion built from those totals. Flip the flag on
+  // such an exercise and every one of those numbers is read at twice its real
+  // load — which is exactly what happened to the exercises the first
+  // correction script flagged.
+  //
+  // So this finds every exercise that is, or should be, per side, works out
+  // set by set which of its history is still combined, and ASKS before
+  // changing anything: one screen, one checkbox per exercise. It runs by
+  // itself once, on the first launch of the version that introduced it
+  // (PER_SIDE_REVIEW_VERSION), and from the Exercises tab whenever wanted.
+  //
+  // How a set is judged, oldest first, against a running per-side reference:
+  //   - marked `splitPerSide` -> already one side's (the importer or an
+  //     earlier run of this review converted it): kept, and the reference.
+  //   - Fitbod-imported (isImportedSet()) -> the combined total: split it.
+  //   - logged in the app, within -25%/+35% of the reference -> already one
+  //     side: kept. 1.6x-2.6x the reference -> combined: split. Anything else
+  //     -> unclear: left as logged, and counted on the screen.
+  //   - logged in the app before there's any reference (an exercise with no
+  //     imported history) -> can't be judged from the numbers, so the screen
+  //     asks how they were entered.
+  // Splitting halves every positive entry of the set; assisted (negative)
+  // entries are left alone.
+  // =========================================================================
+  const PER_SIDE_REVIEW_VERSION = 1;
+  // One implement held in both hands, or across the hips: the logged number
+  // is already the total, so these are never per side whatever their name.
+  const SINGLE_IMPLEMENT_RE = /goblet|hip thrust|glute bridge|pullover|sumo|overhead (?:triceps? )?extension|single dumbbell/i;
+  const CATALOG_PER_SIDE_KEYS = new Set(DEFAULT_EXERCISES.filter(d => d.perSide).map(d => nameKey(d.name)));
+
+  function shouldBePerSide(exercise) {
+    if (!exercise) return false;
+    if (exercise.perSide) return true;
+    if (CATALOG_PER_SIDE_KEYS.has(nameKey(exercise.name))) return true;
+    return exerciseEquipment(exercise) === 'dumbbell' && !SINGLE_IMPLEMENT_RE.test(exercise.name || '');
+  }
+
+  // Written by the Fitbod importer: its timestamps are whole seconds (the
+  // export's session time plus one second per row), and an imported day has
+  // no session stamp. A set logged in the app carries a millisecond
+  // Date.now(), and since the session auto-start every day with a set logged
+  // in the app has startedAt.
+  function isImportedSet(workout, set) {
+    return !workout.startedAt && typeof set.ts === 'number' && set.ts % 1000 === 0;
+  }
+
+  // Returns one row per exercise that needs something done:
+  // { exerciseId, name, flagged, split: [ref], ask: [ref], unclear, example }
+  // where a ref is { workoutId, ts } and `example` is { from, to } in kg.
+  function analyzePerSideHistory(exercises, workouts) {
+    const setsByExercise = new Map();
+    for (const w of workouts) {
+      for (const entry of w.exercises || []) {
+        if (!setsByExercise.has(entry.exerciseId)) setsByExercise.set(entry.exerciseId, []);
+        for (const set of entry.sets || []) setsByExercise.get(entry.exerciseId).push({ workout: w, set });
+      }
+    }
+    const rows = [];
+    for (const ex of exercises) {
+      if (!shouldBePerSide(ex)) continue;
+      const sets = (setsByExercise.get(ex.id) || [])
+        .filter(x => { const en = workingEntry(x.set); return en && en.weight > 0; })
+        .sort((a, b) => (a.set.ts || 0) - (b.set.ts || 0));
+      if (!sets.length) continue;
+      const row = { exerciseId: ex.id, name: ex.name, flagged: !!ex.perSide, split: [], ask: [], unclear: 0, example: null };
+      let ref = null;
+      for (const { workout, set } of sets) {
+        const w = workingEntry(set).weight;
+        const at = { workoutId: workout.id, ts: set.ts };
+        // Already converted to one side — by the importer or by an earlier
+        // run of this review. Without this, an imported set still LOOKS
+        // imported after being halved, and a second run halved it again.
+        if (set.splitPerSide) { ref = w; continue; }
+        if (isImportedSet(workout, set)) {
+          row.split.push(at);
+          if (!row.example) row.example = { from: w, to: w / 2 };
+          ref = w / 2;
+          continue;
+        }
+        if (ref == null) {
+          // A flagged exercise has been showing "per side" under its weight
+          // field, so a number typed against it is taken as one side's.
+          if (row.flagged) ref = w; else row.ask.push(at);
+          continue;
+        }
+        const ratio = w / ref;
+        if (ratio >= 0.75 && ratio <= 1.35) ref = w;
+        else if (ratio >= 1.6 && ratio <= 2.6) {
+          row.split.push(at);
+          if (!row.example) row.example = { from: w, to: w / 2 };
+          ref = w / 2;
+        } else row.unclear++;
+      }
+      if (!row.flagged || row.split.length) rows.push(row);
+    }
+    return rows.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  // `decisions` is { [exerciseId]: { checked, how } } — `how` is 'side' or
+  // 'combined', and only matters for a row's `ask` sets. Re-reads the store
+  // under the workout lock and finds each set by (workout id, ts), so a set
+  // logged while the screen was open can't be mistaken for one it listed.
+  // All writes go in one transaction (putRecordsAtomically()).
+  async function applyPerSideReview(rows, decisions) {
+    return withWorkoutLock(async () => {
+      const byId = new Map((await getAllWorkouts()).map(w => [w.id, w]));
+      const edited = new Map();
+      const editable = (workoutId) => {
+        if (!edited.has(workoutId) && byId.has(workoutId)) edited.set(workoutId, JSON.parse(JSON.stringify(byId.get(workoutId))));
+        return edited.get(workoutId);
+      };
+      const exercisesToFlag = [];
+      let setCount = 0, exerciseCount = 0;
+      for (const row of rows) {
+        const d = decisions[row.exerciseId];
+        if (!d || !d.checked) continue;
+        exerciseCount++;
+        const targets = row.split.concat(d.how === 'combined' ? row.ask : []);
+        for (const { workoutId, ts } of targets) {
+          const w = editable(workoutId);
+          const entry = w && w.exercises.find(e => e.exerciseId === row.exerciseId);
+          const set = entry && entry.sets.find(s => s.ts === ts);
+          if (!set || set.splitPerSide) continue;
+          set.entries.forEach(en => { if (en.weight > 0) en.weight = Math.round((en.weight / 2) * 100) / 100; });
+          // Marked, so no later run (or the importer) ever halves it again.
+          set.splitPerSide = true;
+          setCount++;
+        }
+        if (!row.flagged) {
+          const ex = await getRecord('exercises', row.exerciseId);
+          if (ex) exercisesToFlag.push({ ...ex, perSide: true });
+        }
+      }
+      await putRecordsAtomically({ workouts: [...edited.values()], exercises: exercisesToFlag });
+      return { sets: setCount, exercises: exerciseCount };
+    });
+  }
+
+  // --- The screen -----------------------------------------------------------
+  let perSideRows = [];
+
+  function perSideRowHtml(row) {
+    const n = row.split.length;
+    const example = row.example ? ` (e.g. ${displayWeight(row.example.from)} → ${displayWeight(row.example.to)} ${weightUnit})` : '';
+    const parts = [];
+    if (row.flagged) parts.push(`Already per side, but ${n} older set${n === 1 ? ' is' : 's are'} the combined weight — halved${example}.`);
+    else if (n) parts.push(`Turns on per side; ${n} set${n === 1 ? '' : 's'} stored as the combined weight — halved${example}.`);
+    else if (!row.ask.length) parts.push('Turns on per side; the logged sets already look like one dumbbell’s weight.');
+    else parts.push('Turns on per side.');
+    if (row.unclear) parts.push(`${row.unclear} set${row.unclear === 1 ? '' : 's'} fit neither pattern and stay as logged.`);
+    const ask = row.ask.length ? `
+      <div class="perside-ask">${row.ask.length} set${row.ask.length === 1 ? '' : 's'} logged in the app, entered as:
+        <label><input type="radio" name="perside-how-${row.exerciseId}" value="side" checked> one dumbbell</label>
+        <label><input type="radio" name="perside-how-${row.exerciseId}" value="combined"> both combined</label>
+      </div>` : '';
+    return `
+      <div class="perside-row">
+        <label class="switch-row"><input type="checkbox" data-exid="${row.exerciseId}" checked><span>${esc(row.name)}</span></label>
+        <div class="hint">${esc(parts.join(' '))}</div>${ask}
+      </div>`;
+  }
+
+  function readPerSideDecisions() {
+    const decisions = {};
+    document.querySelectorAll('#perside-list input[type="checkbox"][data-exid]').forEach(box => {
+      const id = Number(box.dataset.exid);
+      const how = document.querySelector(`input[name="perside-how-${id}"]:checked`);
+      decisions[id] = { checked: box.checked, how: how ? how.value : 'side' };
+    });
+    return decisions;
+  }
+
+  async function markPerSideReviewed() {
+    await setSetting('perSideReviewVersion', PER_SIDE_REVIEW_VERSION);
+  }
+
+  // Returns true if the screen was shown. With nothing to fix, the automatic
+  // run just records that it happened; an on-demand run says so.
+  async function openPerSideReview({ automatic = false } = {}) {
+    perSideRows = analyzePerSideHistory(await getAllRecords('exercises'), await getAllWorkouts());
+    if (!perSideRows.length) {
+      await markPerSideReviewed();
+      if (!automatic) toast('Every per-side exercise is already stored one side’s worth');
+      return false;
+    }
+    document.getElementById('perside-list').innerHTML = perSideRows.map(perSideRowHtml).join('');
+    document.getElementById('perside-modal').hidden = false;
+    return true;
+  }
+
+  async function maybeRunPerSideReview() {
+    if ((Number(await getSetting('perSideReviewVersion', 0)) || 0) >= PER_SIDE_REVIEW_VERSION) return false;
+    return openPerSideReview({ automatic: true });
+  }
+
+  async function closePerSideReview() {
+    document.getElementById('perside-modal').hidden = true;
+    await markPerSideReviewed();
+  }
+
+  document.getElementById('perside-skip').addEventListener('click', async () => {
+    await closePerSideReview();
+    toast('Left as is — run it any time from the Exercises tab');
+  });
+  document.getElementById('perside-close').addEventListener('click', closePerSideReview);
+  document.getElementById('perside-review-btn').addEventListener('click', () => openPerSideReview());
+  document.getElementById('perside-apply').addEventListener('click', async () => {
+    const btn = document.getElementById('perside-apply');
+    btn.disabled = true;
+    try {
+      const decisions = readPerSideDecisions();
+      if (document.getElementById('perside-backup-first').checked) await safetyBackup('per-side-split');
+      const result = await applyPerSideReview(perSideRows, decisions);
+      await closePerSideReview();
+      toast(`Split ${result.sets} set${result.sets === 1 ? '' : 's'} across ${result.exercises} exercise${result.exercises === 1 ? '' : 's'}`);
+      invalidateExercisePicker();
+      await renderExerciseManager();
+      await refreshLogAndHistory();
+      await refreshPlanTab();
+    } catch (err) {
+      reportUnexpected('Per-side split', err);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
 </script>
 </body>
 </html>

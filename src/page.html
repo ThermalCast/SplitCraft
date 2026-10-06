@@ -869,6 +869,23 @@
 
   .dropmyo-modal-body { padding: 13px 15px calc(15px + env(safe-area-inset-bottom, 0px)); }
 
+  /* Per-side review: a scrolling list of exercises, one checkbox each, with
+     the backup box and the buttons pinned below it so Split is always in
+     reach however long the list is. */
+  .perside-body { padding: 13px 15px 6px; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+  .perside-footer {
+    flex: 0 0 auto; padding: 8px 15px calc(12px + env(safe-area-inset-bottom, 0px));
+    border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+  }
+  .perside-footer .switch-row { flex: 1 1 100%; min-height: 36px; }
+  .perside-footer button.primary-btn { flex: 1 1 auto; width: auto; margin-top: 0; }
+  .perside-footer button.ghost { margin-top: 0; }
+  .perside-row { padding: 9px 0; border-bottom: 1px solid var(--border); }
+  .perside-row .hint { margin: 2px 0 0 30px; }
+  .perside-ask { margin: 6px 0 0 30px; font-size: 12.5px; color: var(--text-dim); display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; }
+  .perside-ask label { display: inline-flex; align-items: center; gap: 6px; margin: 0; font-size: 12.5px; font-weight: 600; color: var(--text); text-transform: none; letter-spacing: 0; }
+  .perside-ask input { accent-color: var(--accent); }
+
   /* ===== New-week plan prompt =====
      Accent-bordered rather than another neutral card: it is the one thing on
      the tab asking for a decision, and it appears at most once a week. */
@@ -1648,6 +1665,9 @@
       <input type="search" id="exercise-filter" placeholder="Search exercises…" autocomplete="off">
     </div>
     <div class="hint" id="exercise-count-hint" style="margin-top:0;"></div>
+    <!-- Re-opens the per-side review (13-per-side-review.js) that runs once by
+         itself after the update that introduced it. -->
+    <button type="button" class="link-btn" id="perside-review-btn">Check per-side history…</button>
 
     <details class="disclosure">
       <summary>Add an exercise</summary>
@@ -1738,6 +1758,31 @@
         <div id="dropmyo-rows-container" class="entry-rows"></div>
         <button type="button" class="add-row" id="dropmyo-add-row-btn">+ Add</button>
         <button type="button" class="add" id="dropmyo-log-btn">Log</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Per-side history review (13-per-side-review.js): which per-side
+       exercises still have history stored as the combined weight of both
+       sides, one checkbox each. Shown by itself once after the update that
+       introduced it, and from the Exercises tab on demand. -->
+  <div class="prompt-modal" id="perside-modal" hidden>
+    <div class="prompt-modal-card">
+      <div class="prompt-modal-header">
+        <h3>Per-side weights</h3>
+        <button type="button" class="prompt-modal-close" id="perside-close" aria-label="Close">×</button>
+      </div>
+      <div class="perside-body">
+        <div class="hint" style="margin-top:0;">These exercises are logged one dumbbell (or one side) at a time, but some of their history is stored as the combined weight of both. Splitting halves those sets so every number means one side — the real load the app works from stays exactly the same.</div>
+        <div id="perside-list"></div>
+      </div>
+      <div class="perside-footer">
+        <label class="switch-row" for="perside-backup-first">
+          <input type="checkbox" id="perside-backup-first" checked>
+          <span>Download a backup first</span>
+        </label>
+        <button type="button" class="primary-btn" id="perside-apply">Split checked exercises</button>
+        <button type="button" class="ghost" id="perside-skip">Not now</button>
       </div>
     </div>
   </div>

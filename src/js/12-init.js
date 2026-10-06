@@ -111,6 +111,11 @@
     selectedLogDayIdx = null; // fresh load — reset the Log tab's day pick
     await refreshPlanTab();
     await renderExerciseManager();
+    // Once, on the first launch of the version that introduced it: offer to
+    // split per-side history still stored as combined weights (see
+    // 13-per-side-review.js). Not awaited past its own failure — a problem in
+    // the review must never take startup with it.
+    await maybeRunPerSideReview().catch(err => reportUnexpected('Per-side review', err));
 
     // Not awaited: requesting persistent storage (and painting the result in
     // Settings) is a nice-to-have, not something the rest of startup should

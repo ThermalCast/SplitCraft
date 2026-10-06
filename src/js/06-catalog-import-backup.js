@@ -329,6 +329,11 @@
 
     const byDate = new Map(); // localDate -> { ts, setCounter, exercises: Map<nameLower, {name, sets:[{ts,reps,weight}]}> }
     let skippedNoReps = 0, skippedWarmup = 0, skippedBadRow = 0, assistedSets = 0, badMultiplierSets = 0;
+    // nameKey()s Fitbod itself logs per side (`multiplier: 2.0` on any row):
+    // one dumbbell / one cable / one side, with both sides doing the work.
+    // That's exactly what `perSide` means, so it's ground truth for a new
+    // exercise's flag rather than a guess from its name.
+    const perSideKeys = new Set();
     // Only Date/Exercise/Reps/Weight(kg) are required (see the docs above and
     // the format-guard a few lines up); isWarmup and multiplier are optional
     // trailing columns that already degrade safely to defaults when read
@@ -362,6 +367,7 @@
       // skip/warning category so it surfaces there instead.
       if (col.multiplier >= 0 && isNaN(rawMultiplier)) badMultiplierSets++;
       const multiplier = isNaN(rawMultiplier) ? 1 : rawMultiplier;
+      if (multiplier === 2) perSideKeys.add(nameKey(name));
       const w = isNaN(weightKg) ? 0 : weightKg;
       // multiplier 0 means "this load isn't on you". Two distinct cases in a
       // real export, cleanly separated by whether Weight(kg) is populated:
@@ -390,7 +396,7 @@
       dayEntry.setCounter++;
     }
 
-    return { byDate, skippedNoReps, skippedWarmup, skippedBadRow, assistedSets, badMultiplierSets };
+    return { byDate, skippedNoReps, skippedWarmup, skippedBadRow, assistedSets, badMultiplierSets, perSideKeys };
   }
 
   document.getElementById('import-form').addEventListener('submit', (e) => e.preventDefault());
@@ -445,7 +451,7 @@
     try {
       const allExercises = await getAllRecords('exercises');
       const byNameLower = new Map(allExercises.map(e => [nameKey(e.name), e]));
-      let newExerciseCount = 0, unclassifiedCount = 0, importedSets = 0, importedDays = 0;
+      let newExerciseCount = 0, unclassifiedCount = 0, importedSets = 0, importedDays = 0, perSideCreatedCount = 0;
       const replaceMode = document.getElementById('import-mode').value === 'replace';
       const clearedKeys = new Set();
       let replacedSets = 0;
@@ -463,8 +469,15 @@
           if (!exRecord) {
             const primaryMuscle = classifyMuscleFromName(exInfo.name);
             if (primaryMuscle === 'unclassified') unclassifiedCount++;
-            const newId = await addRecord('exercises', { name: exInfo.name, primaryMuscle, secondaryMuscles: [], equipment: classifyEquipmentFromName(exInfo.name), custom: true });
-            exRecord = { id: newId, name: exInfo.name, primaryMuscle };
+            // Fitbod's own multiplier decides the flag for an exercise this
+            // import creates (see perSideKeys in parseFitbodCSV()). Created
+            // without it, every dumbbell exercise from an export came in as
+            // "combined", and turning the flag on later silently doubled its
+            // whole imported history.
+            const perSide = !!(pendingImport.perSideKeys && pendingImport.perSideKeys.has(key));
+            if (perSide) perSideCreatedCount++;
+            const newId = await addRecord('exercises', { name: exInfo.name, primaryMuscle, secondaryMuscles: [], equipment: classifyEquipmentFromName(exInfo.name), custom: true, ...(perSide ? { perSide: true } : {}) });
+            exRecord = { id: newId, name: exInfo.name, primaryMuscle, perSide };
             byNameLower.set(key, exRecord);
             newExerciseCount++;
           }
@@ -490,7 +503,12 @@
             // both land on the same true total, whether the exercise's
             // history came from hand-entry or this import.
             const storedWeight = exRecord.perSide ? Math.round((s.weight / 2) * 100) / 100 : s.weight;
-            workoutExEntry.sets.push({ ts: s.ts, type: 'standard', entries: [{ weight: storedWeight, reps: s.reps }] });
+            // `splitPerSide` records that this imported set is ALREADY one
+            // side's — the per-side review (13-per-side-review.js) otherwise
+            // reads an imported set as Fitbod's combined total and would
+            // offer to halve it a second time.
+            workoutExEntry.sets.push({ ts: s.ts, type: 'standard', entries: [{ weight: storedWeight, reps: s.reps }],
+              ...(exRecord.perSide ? { splitPerSide: true } : {}) });
             importedSets++;
           });
         }
@@ -501,7 +519,8 @@
       successBox.textContent = `Imported ${importedSets} sets across ${importedDays} day(s).` +
         (replacedSets ? ` Replaced ${replacedSets} previously imported set(s).` : '') +
         ` ${newExerciseCount} new exercise(s) created` +
-        (unclassifiedCount ? `, ${unclassifiedCount} of which couldn’t be auto-classified — check the Exercises tab and reassign their muscle group.` : '.');
+        (unclassifiedCount ? `, ${unclassifiedCount} of which couldn’t be auto-classified — check the Exercises tab and reassign their muscle group.` : '.') +
+        (perSideCreatedCount ? ` ${perSideCreatedCount} of them marked per side (Fitbod logs them one dumbbell or one side at a time).` : '');
       successBox.style.display = 'block';
       pendingImport = null;
       document.getElementById('import-preview').style.display = 'none';

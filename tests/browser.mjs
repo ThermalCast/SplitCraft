@@ -190,6 +190,44 @@ try {
   check('History isn\'t rebuilt while hidden, and renders when its tab is tapped (real tab panels)',
     lazy && lazy.whileHidden === 0 && lazy.afterTap >= 1, JSON.stringify(lazy));
 
+  // --- 5b. The per-side review: shown on launch, Split halves, never twice. ---
+  await run(`
+    await clearWorkoutHistory();
+    const exId = await addRecord('exercises', { name: 'Browser Dumbbell Curl', primaryMuscle: 'biceps', secondaryMuscles: [], equipment: 'dumbbell', custom: true });
+    const t = Date.parse('2026-02-01T10:00:00');   // whole seconds, no startedAt: a Fitbod import
+    await addRecord('workouts', { date: '2026-02-01', ts: t, planId: null, dayIndex: null, dayName: null,
+      exercises: [{ exerciseId: exId, sets: [{ ts: t, type: 'standard', entries: [{ weight: 20, reps: 10 }] }] }] });
+    await clearSetting('perSideReviewVersion');
+    return true;`);
+  const reloadAndWait = async () => {
+    await send('Page.reload', {});
+    for (let i = 0; i < 100; i++) {
+      await sleep(100);
+      if (await run('return typeof refreshLogAndHistory === "function" && !!db && !!document.getElementById("perside-modal");')) break;
+    }
+    await sleep(800);
+  };
+  await reloadAndWait();
+  const review = await run(`
+    const modal = document.getElementById('perside-modal');
+    const shown = !modal.hidden && document.getElementById('perside-list').textContent.includes('Browser Dumbbell Curl');
+    document.getElementById('perside-backup-first').checked = false;   // no download in a test
+    document.getElementById('perside-apply').click();
+    await new Promise(r => setTimeout(r, 800));
+    const ex = (await getAllRecords('exercises')).find(e => e.name === 'Browser Dumbbell Curl');
+    const w = (await getAllWorkouts()).find(x => x.date === '2026-02-01');
+    return { shown, hiddenAfter: modal.hidden, perSide: ex.perSide, weight: w.exercises[0].sets[0].entries[0].weight,
+      version: await getSetting('perSideReviewVersion', 0) };`);
+  await reloadAndWait();
+  const second = await run(`
+    const w = (await getAllWorkouts()).find(x => x.date === '2026-02-01');
+    return { shownAgain: !document.getElementById('perside-modal').hidden, weight: w.exercises[0].sets[0].entries[0].weight };`);
+  check('the per-side review opens on launch, Split halves the combined set and flags the exercise',
+    review && review.shown && review.hiddenAfter && review.perSide === true && review.weight === 10 && review.version >= 1,
+    JSON.stringify(review));
+  check('...and on the next launch it stays closed and nothing is halved again',
+    second && second.shownAgain === false && second.weight === 10, JSON.stringify(second));
+
   // --- 6. A restore that fails partway changes nothing. ---
   const restore = await run(`
     await setSetting('planNotes', 'before-restore');

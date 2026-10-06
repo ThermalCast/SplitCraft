@@ -83,7 +83,10 @@ calendar day trained:
 - `exercises` — `[{exerciseId, sets: [{ts, type, entries}]}]`. `entries`
   length >1 for drop sets and myo reps. **`entries[].weight` is always
   kilograms** — sets carry no `unit` field; display/input unit is one global
-  setting (see "Weight unit" below).
+  setting (see "Weight unit" below). A set may also carry `rir` (answered
+  after logging) and `splitPerSide: true` (the set has already been converted
+  to one side's worth — by the importer, for a per-side exercise, or by the
+  per-side review — so nothing ever halves it twice).
 - `startedAt`, `endedAt`, `durationMs` — set by the Start Warm-up/Complete
   Workout buttons; `null`/absent until a session starts. `startedAt` is also
   set automatically by `logSetLocked()` on the first set logged that day, if
@@ -172,6 +175,9 @@ value — the mirror is consulted only once, at load, never per read:
 - **Plan scheduling** — `planWeekDismissed` (the week-start a regeneration
   prompt was dismissed for; expires by itself next Monday)
 - **Display** — `weightUnit` ('kg' | 'lb', display-only)
+- **One-time reviews** — `perSideReviewVersion` (the per-side history
+  review's version last shown or found unnecessary; see "The per-side
+  history review" under Per-side weight)
 - **Backup** — `lastBackupAt` (epoch ms of the last export/share/Dropbox
   upload that actually completed; feeds the "Last backup" reminder in
   Settings), `dropboxRefreshToken` (present only once Dropbox is connected —
@@ -1355,22 +1361,31 @@ touches it. Fixing it there fixes `progressionPlan()`, `checkPersonalRecord()`,
 `setVolumeKg()`, and the History progress chart's top-set/est-1RM series all
 at once, since none of them compute "true load" any other way.
 
+**What `perSide` means: the logged number is ONE side's, and both sides do
+the work** — together (a dumbbell press) or one after the other (a one-arm
+row). That's exactly Fitbod's `multiplier: 2.0`, which is the reference
+convention here. One-arm work used to be deliberately excluded, on the
+reasoning that doubling a one-arm row's dumbbell would make it progress too
+fast. That stopped being true once `progressionPlan()` compared its target
+against the real-load step (see "The rounding floor and the frequency
+conversion"): per-side no longer changes the progression RATE at all — 2% of
+2w against a 2×step jump is the same schedule as 2% of w against one step —
+so what it still changes is volume and the charted load, where counting both
+sides is what Fitbod does and what "how much work was that" means.
+
 **Curated per exercise, not guessed from the name.** Unlike `equipment`
 (classified from the name for every exercise, including the 92-entry
-catalog), `perSide` is hand-set directly on the catalog entries that are
-unambiguously bilateral — Dumbbell Bench Press, Incline Dumbbell Press,
-Dumbbell Fly, Dumbbell Shoulder Press, Dumbbell Shrug, Dumbbell Curl, Hammer
-Curl, Incline Dumbbell Curl, Farmers Walk — the same way `primaryMuscle`/
-`secondaryMuscles` already are. A name-based guess was deliberately rejected:
-"dumbbell" alone doesn't say it — Goblet Squat is one implement held with
-both hands, and Dumbbell Row is conventionally one arm at a time, bracing on
-a bench, so the number already IS the true per-rep load for that one. A
-confidently wrong guess there would silently double a lift that was never
-ambiguous in the first place, which is worse than the ambiguity this exists
-to fix — the same "refuse to guess" principle the muscle/equipment
-classifiers and the starting-weight estimator already follow. Both of those
-two catalog entries are left `perSide`-absent (combined, unchanged) on
-purpose.
+catalog), `perSide` is hand-set directly on the catalog entries it applies
+to — Dumbbell Bench Press, Incline Dumbbell Press, Dumbbell Fly, Dumbbell
+Shoulder Press, Arnold Press, Front Raise, Lateral Raise, Cable Lateral
+Raise, Rear Delt Fly, Bent-Over Reverse Fly, Triceps Kickback, Dumbbell Row,
+Dumbbell Shrug, Dumbbell Curl, Hammer Curl, Incline Dumbbell Curl, Farmers
+Walk — the same way `primaryMuscle`/`secondaryMuscles` already are. A
+name-based guess was deliberately rejected: "dumbbell" alone doesn't say it
+— Goblet Squat is one implement held with both hands, so its number already
+IS the total and doubling it would be wrong. Entries whose loading varies
+too much to call (Bulgarian Split Squat, lunges, step-ups) are left absent
+too; the Exercises tab's checkbox is there for those.
 
 **Retroactive, but only where it's safe.** `syncDefaultExercises()`
 (12-init.js) propagates the curated value onto matching
@@ -1386,10 +1401,56 @@ real, already-correct numbers. `loggedExerciseIds` (a `Set` built once per
 sync from `getAllWorkouts()`) is the gate; the curated default only ever
 reaches an exercise nobody has logged against yet.
 
-**Custom, AI-generated and CSV-imported exercises default to `false`
-(unchanged), never guessed** — same reasoning as above, with more force:
-there's no curated ground truth for a name nobody has reviewed, only a
-classifier, and this is exactly the class of mistake a classifier is bad at.
+**A Fitbod import sets it from the file, not from a guess.** An exercise
+the importer CREATES is marked `perSide` when any of its rows carries
+`multiplier: 2.0` (`perSideKeys`, from `parseFitbodCSV()`), and its weights
+are stored one side's worth (see the halving below). That's Fitbod's own
+record of how the exercise was logged, so it's ground truth rather than a
+name-based guess. Created without it — the original behavior — every
+dumbbell exercise in an export came in as "combined", and turning the flag
+on later silently doubled its whole imported history.
+
+**The per-side history review.** A flag only means something if the
+history under it agrees. Fitbod imports store the combined total of both
+dumbbells, and so do sets typed in by following a suggestion built from
+those totals; flip `perSide` on such an exercise and every one of those
+numbers reads at twice its real load. That is exactly what the first
+(script-based) correction did to three exercises: flag on, imported totals
+left as they were. `13-per-side-review.js` fixes this in the app, and
+**asks first**:
+
+- **Which exercises.** Every exercise that is, or should be, per side
+  (`shouldBePerSide()`): already flagged, a per-side catalog name, or
+  dumbbell equipment that isn't a one-implement movement (`goblet`,
+  `hip thrust`, `pullover`… — `SINGLE_IMPLEMENT_RE`).
+- **Which sets, oldest first, against a running per-side reference.** A set
+  marked `splitPerSide` has already been converted (by the importer, or by
+  an earlier run of the review — every set it halves gets the mark), so it's
+  kept and becomes the reference; without the mark, a halved imported set
+  still looks imported and a second run would halve it again. A
+  Fitbod-imported set (`isImportedSet()`: a whole-second timestamp on a
+  day with no session stamp, which an in-app set never has) is the combined
+  total — split it. A set logged in the app within −25%/+35% of
+  the reference is already one side; 1.6×–2.6× is combined and split;
+  anything else is "unclear" and left as logged. App-logged sets with no
+  reference yet (an exercise with no imported history) can't be judged from
+  the numbers, so the screen asks how they were entered.
+- **The screen** (`#perside-modal`): one checkbox per exercise, each saying
+  what will happen and an example ("halved, e.g. 70 → 35 lb"), a "Download a
+  backup first" box (on by default), Split or Not now.
+  `applyPerSideReview()` re-reads the store under the workout lock, finds
+  each set by (workout id, ts), halves every positive entry, flags the
+  exercise, and writes it all in ONE transaction (`putRecordsAtomically()`)
+  so history and flags can never disagree halfway.
+- **When.** By itself once, on the first launch of the version that
+  introduced it (`perSideReviewVersion` < `PER_SIDE_REVIEW_VERSION`;
+  recorded whether you split, skip, or there was nothing to do), and any
+  time from the Exercises tab ("Check per-side history…").
+
+**Custom and AI-generated exercises default to `false` (unchanged), never
+guessed** — same reasoning as above, with more force: there's no curated
+ground truth for a name nobody has reviewed, only a classifier, and this is
+exactly the class of mistake a classifier is bad at.
 The Exercises tab's "per side" checkbox (`renderExerciseManager()`, next to
 the muscle/equipment selects, wired through
 `EXERCISE_MANAGER_CHANGE_ACTIONS['toggle-per-side']`) is the one place it's
@@ -2286,8 +2347,9 @@ minority who want it.
 ### Writes are serialised
 
 Every workout mutation is read → mutate → write with an `await` in the
-middle, and they all contend for one record: today's workout. The eleven
-mutators queue behind **`withWorkoutLock()`**, since IndexedDB transactions
+middle, and they all contend for one record: today's workout. The twelve
+mutators (the per-side review's bulk split among them, since it rewrites
+history records including today's) queue behind **`withWorkoutLock()`**, since IndexedDB transactions
 alone can't fix this (the read and write are separate transactions with
 application logic between them). Reads are untouched. The Log button
 additionally disables itself for the write — the lock makes a double-tap
@@ -2878,7 +2940,7 @@ branch and both created one, and because the `date` index wasn't unique,
 `getWorkoutForDate()` only ever found the first — the second day's sets
 vanished from the active workout and from today's volume while still
 appearing as a duplicate "Today" row in History. Fixed with
-`withWorkoutLock()` serialising the eleven mutators; IndexedDB transactions
+`withWorkoutLock()` serialising the workout mutators (twelve today); IndexedDB transactions
 alone couldn't fix it since the read and write are separate transactions
 with application logic in between.
 

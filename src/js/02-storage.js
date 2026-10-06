@@ -6,7 +6,7 @@
   //   workouts      — one record per calendar day trained. { date, ts,
   //                   planId, dayIndex, dayName, exercises: [{ exerciseId,
   //                   sets: [{ts, type:'standard'|'drop'|'myo', entries:
-  //                   [{weight,reps}, ...]}] }], targetOverrides: {exerciseId:
+  //                   [{weight,reps}, ...], rir?, splitPerSide?}] }], targetOverrides: {exerciseId:
   //                   number} }. `weight` is always kilograms — sets no
   //                   longer carry their own unit (removed in the v5
   //                   migration); the app has exactly one global display
@@ -337,6 +337,33 @@
       memory.nextId[store] = Math.max(memory.nextId[store], (Number(record.id) || 0) + 1);
     }
     return record.id;
+  }
+
+  // Several existing records across one or more stores, written in ONE
+  // transaction on IndexedDB: a bulk correction (the per-side review, which
+  // rewrites history and flips exercise flags together) must land whole or
+  // not at all — half-halved history next to a flag that says "per side"
+  // would be exactly the inconsistency it exists to fix. Same explicit abort
+  // on a synchronous put() throw as idbReplaceAll().
+  async function putRecordsAtomically(byStore) {
+    const stores = Object.keys(byStore).filter(s => byStore[s] && byStore[s].length);
+    if (!stores.length) return;
+    if (stores.includes('workouts')) invalidateWorkoutsCache();
+    if (!dbAvailable) {
+      for (const store of stores) for (const rec of byStore[store]) await putRecord(store, rec);
+      return;
+    }
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(stores, 'readwrite');
+      tx.oncomplete = () => resolve();
+      tx.onabort = () => reject(tx.error || new Error('Saving was rolled back — nothing was changed'));
+      try {
+        for (const store of stores) for (const rec of byStore[store]) tx.objectStore(store).put(rec);
+      } catch (e) {
+        try { tx.abort(); } catch (abortErr) { /* already finished */ }
+        reject(e);
+      }
+    });
   }
 
   // Used by restore, which rewrites every store wholesale.

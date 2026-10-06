@@ -64,16 +64,15 @@
     { id: 'other', name: 'Other / free', defaultStepKg: 2.5 }
   ];
 
-  // `perSide: true` marks an exercise as genuinely two implements moving
-  // together (both dumbbells pressed/curled/shrugged at once) — see
-  // "Per-side weight" in design-summary.md. Curated by hand per entry here,
-  // the same way primaryMuscle/secondaryMuscles are, rather than guessed
-  // from the name: "dumbbell" alone doesn't say it (Goblet Squat is one
-  // implement; Dumbbell Row is conventionally one arm at a time), and a
-  // confidently wrong guess would silently double someone's real progression
-  // numbers. Absent (the default) means "log the true total load," today's
-  // unchanged behavior — only entries below that are unambiguously bilateral
-  // get it.
+  // `perSide: true` marks an exercise whose logged weight is ONE side's —
+  // one dumbbell, one cable, one arm's horn — while both sides do the work,
+  // together (a dumbbell press) or one after the other (a one-arm row). Same
+  // convention as Fitbod's `multiplier: 2.0`. See "Per-side weight" in
+  // design-summary.md. Curated by hand per entry here, the same way
+  // primaryMuscle/secondaryMuscles are, rather than guessed from the name:
+  // "dumbbell" alone doesn't say it (Goblet Squat and a dumbbell hip thrust
+  // are ONE implement, logged as the total). Absent (the default) means "log
+  // the true total load".
   const DEFAULT_EXERCISES = [
     // ---- Chest ----
     { name: 'Barbell Bench Press', primaryMuscle: 'chest', secondaryMuscles: ['triceps', 'front_delts'] },
@@ -92,20 +91,20 @@
     { name: 'Overhead Press', primaryMuscle: 'front_delts', secondaryMuscles: ['triceps'] },
     { name: 'Dumbbell Shoulder Press', primaryMuscle: 'front_delts', secondaryMuscles: ['triceps'], perSide: true },
     { name: 'Machine Shoulder Press', primaryMuscle: 'front_delts', secondaryMuscles: ['triceps'] },
-    { name: 'Arnold Press', primaryMuscle: 'front_delts', secondaryMuscles: ['side_delts', 'triceps'] },
-    { name: 'Front Raise', primaryMuscle: 'front_delts', secondaryMuscles: [] },
+    { name: 'Arnold Press', primaryMuscle: 'front_delts', secondaryMuscles: ['side_delts', 'triceps'], perSide: true },
+    { name: 'Front Raise', primaryMuscle: 'front_delts', secondaryMuscles: [], perSide: true },
 
     // ---- Side delts ----
-    { name: 'Lateral Raise', primaryMuscle: 'side_delts', secondaryMuscles: [] },
-    { name: 'Cable Lateral Raise', primaryMuscle: 'side_delts', secondaryMuscles: [] },
+    { name: 'Lateral Raise', primaryMuscle: 'side_delts', secondaryMuscles: [], perSide: true },
+    { name: 'Cable Lateral Raise', primaryMuscle: 'side_delts', secondaryMuscles: [], perSide: true },
     { name: 'Machine Lateral Raise', primaryMuscle: 'side_delts', secondaryMuscles: [] },
     { name: 'Upright Row', primaryMuscle: 'side_delts', secondaryMuscles: ['upper_back'] },
 
     // ---- Rear delts ----
     { name: 'Face Pull', primaryMuscle: 'rear_delts', secondaryMuscles: ['upper_back'] },
     { name: 'Reverse Pec Deck', primaryMuscle: 'rear_delts', secondaryMuscles: ['upper_back'] },
-    { name: 'Rear Delt Fly', primaryMuscle: 'rear_delts', secondaryMuscles: ['upper_back'] },
-    { name: 'Bent-Over Reverse Fly', primaryMuscle: 'rear_delts', secondaryMuscles: ['upper_back'] },
+    { name: 'Rear Delt Fly', primaryMuscle: 'rear_delts', secondaryMuscles: ['upper_back'], perSide: true },
+    { name: 'Bent-Over Reverse Fly', primaryMuscle: 'rear_delts', secondaryMuscles: ['upper_back'], perSide: true },
 
     // ---- Triceps ----
     { name: 'Triceps Pushdown', primaryMuscle: 'triceps', secondaryMuscles: [] },
@@ -113,7 +112,7 @@
     { name: 'Overhead Triceps Extension', primaryMuscle: 'triceps', secondaryMuscles: [] },
     { name: 'Close-Grip Bench Press', primaryMuscle: 'triceps', secondaryMuscles: ['chest', 'front_delts'] },
     { name: 'Bench Dip', primaryMuscle: 'triceps', secondaryMuscles: ['chest'] },
-    { name: 'Triceps Kickback', primaryMuscle: 'triceps', secondaryMuscles: [] },
+    { name: 'Triceps Kickback', primaryMuscle: 'triceps', secondaryMuscles: [], perSide: true },
 
     // ---- Lats ----
     { name: 'Pull-Up', primaryMuscle: 'lats', secondaryMuscles: ['biceps'] },
@@ -121,7 +120,7 @@
     { name: 'Chin-Up', primaryMuscle: 'lats', secondaryMuscles: ['biceps'] },
     { name: 'Lat Pulldown', primaryMuscle: 'lats', secondaryMuscles: ['biceps'] },
     { name: 'Barbell Row', primaryMuscle: 'lats', secondaryMuscles: ['biceps', 'upper_back'] },
-    { name: 'Dumbbell Row', primaryMuscle: 'lats', secondaryMuscles: ['biceps', 'upper_back'] },
+    { name: 'Dumbbell Row', primaryMuscle: 'lats', secondaryMuscles: ['biceps', 'upper_back'], perSide: true },
     { name: 'T-Bar Row', primaryMuscle: 'lats', secondaryMuscles: ['upper_back', 'biceps'] },
     { name: 'Machine Row', primaryMuscle: 'lats', secondaryMuscles: ['upper_back', 'biceps'] },
     { name: 'Inverted Row', primaryMuscle: 'lats', secondaryMuscles: ['upper_back', 'biceps'] },
