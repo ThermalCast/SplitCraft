@@ -712,8 +712,14 @@ opening, invalidated (`invalidateExercisePicker()`) wherever the catalog
 changes (an exercise added, its muscle reassigned, an import or restore).
 
 **Drop sets and myo reps** are logged from the exercise's own card now, not
-a separate form: a "+ Log a drop set or myo reps" link opens a small modal
-(`openDropMyoModal()`) scoped to that one exercise, pre-titled with its name.
+a separate form: a compact outlined **Drop / Myo** button beside Log, in the
+next-set row (`.log-actions`), opens a small modal (`openDropMyoModal()`)
+scoped to that one exercise, pre-titled with its name. It sits next to Log
+because it is the other way of logging the same set. It used to be an
+orange "+ Log a drop set or myo reps" link in a band of its own above the
+set rows, which cost a row on every card and read like an orphaned link.
+A finished exercise has no next-set row, so no Drop / Myo button; adding a
+bonus set with **+** brings the row, and the button, back.
 The entry mechanism itself — repeatable weight×reps rows, "+ Add Drop"/"+ Add
 Myo Cluster", per-row sign toggle — is unchanged from the old top-level form,
 just relocated; a drop set is still a SEQUENCE of arbitrary weight/rep pairs

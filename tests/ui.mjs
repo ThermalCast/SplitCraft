@@ -268,6 +268,13 @@ await fireAction('toggle-per-side', () => {
   await app.refreshLogAndHistory();
   check('the active-workout card shows the per-side reminder for a perSide exercise',
     app.document.getElementById('active-workout-list').innerHTML.includes('per-side-note'));
+
+  // Drop / Myo sits beside Log in the next-set row, not in a band of its own.
+  const listHtml = app.document.getElementById('active-workout-list').innerHTML;
+  check('the old drop/myo band is gone from the card',
+    !listHtml.includes('drop-myo-toggle'));
+  check('Drop / Myo shares the Log button\'s line (.log-actions) in the next-set row',
+    /<div class="log-actions">\s*<button[^>]*data-action="log-set"[^>]*>Log<\/button>\s*<button[^>]*data-action="open-drop-myo"/.test(listHtml));
   await app.removeExtraExercise(otherExId);
   await app.refreshLogAndHistory();
 }

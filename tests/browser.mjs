@@ -150,6 +150,21 @@ try {
   check('± negates the weight through the .weight-field wrapper (real DOM)',
     sign && sign.value === '-40' && sign.negative === true, JSON.stringify(sign));
 
+  // --- 3b. Drop / Myo shares Log's line, fits the row, and opens its modal. ---
+  const dm = await run(`${usePlan('Dumbbell Bench Press')}
+    document.querySelector('.tab-btn[data-tab="log"]').click();
+    await refreshLogAndHistory();
+    const row = document.querySelector('#ex-card-' + ex.id + ' .plan-log-row.next-set');
+    const r = (el) => el.getBoundingClientRect();
+    const log = r(row.querySelector('.log-btn')), btn = r(row.querySelector('.dropmyo-btn')), box = r(row);
+    row.querySelector('.dropmyo-btn').click();
+    const opened = document.getElementById('dropmyo-modal').hidden === false;
+    closeDropMyoModal();
+    return { sameLine: Math.abs(log.top - btn.top) < 1, fits: btn.right <= box.right + 0.5 && log.left >= box.left - 0.5,
+      logWider: log.width > btn.width, opened };`);
+  check('Drop / Myo sits on Log\'s line inside the row, Log stays the wider, and it opens the modal',
+    dm && dm.sameLine && dm.fits && dm.logWider && dm.opened, JSON.stringify(dm));
+
   // --- 4. A double-tapped × deletes one set. ---
   const del = await run(`${usePlan('Back Squat')}
     for (const kg of [100, 105, 110]) await logSet(ex.id, 'standard', [{ weight: kg, reps: 5 }], null);

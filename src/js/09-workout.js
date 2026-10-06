@@ -158,7 +158,7 @@
 
   // =========================================================================
   // Drop set / myo reps — logged against ONE exercise at a time, opened from
-  // that exercise's own card (.drop-myo-toggle in renderActiveWorkout)
+  // that exercise's own card (the Drop / Myo button beside Log, in renderActiveWorkout)
   // rather than a standalone form with its own exercise picker, since the
   // exercise is already known from whichever card was tapped.
   //
@@ -714,7 +714,10 @@
               ${signBtnHtml(prefillKg != null && prefillKg < 0)}
               ${weightFieldHtml(`<input type="number" inputmode="decimal" step="0.5" aria-label="Weight in ${weightUnit}" class="plan-log-weight" data-action="sync-sign" value="${wVal}">`, exercisesById[effectiveExerciseId])}
               <input type="number" inputmode="numeric" step="1" min="1" placeholder="reps" aria-label="Reps" class="plan-log-reps" value="${rVal}">
-              <button type="button" class="log-btn" data-action="log-set">Log</button>
+              <div class="log-actions">
+                <button type="button" class="log-btn" data-action="log-set">Log</button>
+                <button type="button" class="dropmyo-btn" data-action="open-drop-myo" aria-label="Log a drop set or myo reps" title="Log a drop set or myo reps">Drop / Myo</button>
+              </div>
             </div>
           `;
         } else {
@@ -772,9 +775,6 @@
             <span>Warm-up</span>
             ${warmups.map(w => `<span class="sugg-tag">${displayWeight(w.weightKg)}${weightUnit} × ${w.reps}</span>`).join('')}
           </div>` : ''}
-          <div class="meta-row drop-myo-toggle">
-            <button type="button" class="link-btn" data-action="open-drop-myo">+ Log a drop set or myo reps</button>
-          </div>
           ${setRowsHtml}
         </div>
       `;

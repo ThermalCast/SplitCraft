@@ -614,9 +614,10 @@
   /* ===== Inline set logging / editing rows =====
      flex-wrap so cramped rows reflow onto a second line on narrow phones
      instead of squeezing every control down to an untappable size. */
-  /* Wrapping, deliberately. The Log button declares `flex-basis: 100%` so it
-     takes its own full-width line -- a proper thumb target for the primary
-     action. Setting nowrap here (an earlier attempt at "tidier") left that
+  /* Wrapping, deliberately. The Log button's wrapper (.log-actions) declares
+     `flex-basis: 100%` so it takes its own full-width line -- a proper thumb
+     target for the primary action, with the secondary Drop / Myo button
+     beside it. Setting nowrap here (an earlier attempt at "tidier") left that
      100% basis unwrappable, so flexbox shrank every sibling to fit it on one
      line: a giant LOG next to a weight field squeezed to nothing.
      Only the next-set row has a Log button, so this costs one extra line per
@@ -651,9 +652,14 @@
   /* The set you're about to do — the only row with a Log button. */
   .plan-log-row.next-set { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
   .plan-log-row.next-set .set-idx { background: var(--accent); color: var(--accent-ink); }
+  /* Log and Drop / Myo share one full-width line: both log THIS set, the
+     plain way or as a drop set / myo cluster. Drop / Myo used to be an
+     orange text link in a band of its own above the set rows, costing a
+     row on every card and reading like an orphaned link. */
+  .plan-log-row .log-actions { flex: 1 1 100%; display: flex; gap: 8px; }
   .plan-log-row button.log-btn {
-    /* full-width on its own line — it's the primary action, give it room */
-    flex: 1 1 100%; min-height: 44px;
+    /* the primary action takes whatever the secondary button leaves */
+    flex: 1 1 auto; min-height: 44px;
     background: linear-gradient(180deg, var(--accent-hi), var(--accent));
     color: var(--accent-ink); border: none; border-radius: var(--r-sm);
     font-family: inherit; font-size: 14px; font-weight: 800; letter-spacing: 0.05em;
@@ -661,6 +667,16 @@
     transition: transform 0.1s ease, filter 0.14s ease;
   }
   .plan-log-row button.log-btn:active { transform: scale(0.985); filter: brightness(1.08); }
+  /* Secondary: outlined, same family as the History pill, so it never
+     competes with LOG for attention. */
+  .plan-log-row button.dropmyo-btn {
+    flex: 0 0 auto; min-height: 44px; padding: 0 14px;
+    background: none; border: 1px solid var(--border-strong); color: var(--text-dim);
+    border-radius: var(--r-sm); font-family: inherit; font-size: 12px; font-weight: 700;
+    letter-spacing: 0.05em; text-transform: uppercase; cursor: pointer; white-space: nowrap;
+    transition: color 0.14s ease, border-color 0.14s ease;
+  }
+  .plan-log-row button.dropmyo-btn:active { color: var(--accent); border-color: var(--accent-line); }
 
   .done-count { color: var(--text-faint); font-size: 12px; font-family: var(--sans); }
   .override-note {
@@ -1149,8 +1165,8 @@
            target sets/rep range — not a one-off typed-in weight the way the
            old "Log a set manually" form worked. A drop set or myo cluster
            for any exercise, planned or added, is logged from that
-           exercise's own card instead (see .drop-myo-toggle below) — see
-           #dropmyo-modal. -->
+           exercise's own card instead (the Drop / Myo button beside Log in
+           its next-set row) — see #dropmyo-modal. -->
       <button type="button" class="add-exercise-btn" id="add-exercise-btn">+ Add Exercise</button>
     </div>
 
@@ -1699,7 +1715,7 @@
   </div>
 
   <!-- A drop set or myo cluster against ONE exercise, opened from that
-       exercise's own card (.drop-myo-toggle in renderActiveWorkout) rather
+       exercise's own card (.dropmyo-btn beside Log in renderActiveWorkout) rather
        than a standalone form with its own exercise picker — the exercise is
        already known from whichever card was tapped. Reuses the same
        repeatable weight/rep row mechanism the old "Log a set manually" form
@@ -7825,7 +7841,7 @@
 
   // =========================================================================
   // Drop set / myo reps — logged against ONE exercise at a time, opened from
-  // that exercise's own card (.drop-myo-toggle in renderActiveWorkout)
+  // that exercise's own card (the Drop / Myo button beside Log, in renderActiveWorkout)
   // rather than a standalone form with its own exercise picker, since the
   // exercise is already known from whichever card was tapped.
   //
@@ -8381,7 +8397,10 @@
               ${signBtnHtml(prefillKg != null && prefillKg < 0)}
               ${weightFieldHtml(`<input type="number" inputmode="decimal" step="0.5" aria-label="Weight in ${weightUnit}" class="plan-log-weight" data-action="sync-sign" value="${wVal}">`, exercisesById[effectiveExerciseId])}
               <input type="number" inputmode="numeric" step="1" min="1" placeholder="reps" aria-label="Reps" class="plan-log-reps" value="${rVal}">
-              <button type="button" class="log-btn" data-action="log-set">Log</button>
+              <div class="log-actions">
+                <button type="button" class="log-btn" data-action="log-set">Log</button>
+                <button type="button" class="dropmyo-btn" data-action="open-drop-myo" aria-label="Log a drop set or myo reps" title="Log a drop set or myo reps">Drop / Myo</button>
+              </div>
             </div>
           `;
         } else {
@@ -8439,9 +8458,6 @@
             <span>Warm-up</span>
             ${warmups.map(w => `<span class="sugg-tag">${displayWeight(w.weightKg)}${weightUnit} × ${w.reps}</span>`).join('')}
           </div>` : ''}
-          <div class="meta-row drop-myo-toggle">
-            <button type="button" class="link-btn" data-action="open-drop-myo">+ Log a drop set or myo reps</button>
-          </div>
           ${setRowsHtml}
         </div>
       `;
